@@ -21,6 +21,7 @@ type Config struct {
 	TypstBin      string
 	GitBin        string
 	GitHubAPI     string
+	StaticDir     string // frontend compilado que sirve el propio servidor
 }
 
 // loadDotEnv reads KEY=VALUE pairs from path without overriding existing env vars.
@@ -79,6 +80,11 @@ func Load() (*Config, error) {
 		return nil, errors.New("DATA_DIR inválido")
 	}
 
+	staticDir, err := filepath.Abs(get("STATIC_DIR", defaultStaticDir()))
+	if err != nil {
+		return nil, errors.New("STATIC_DIR inválido")
+	}
+
 	return &Config{
 		Addr:          get("ADDR", ":8080"),
 		DSN:           dsn,
@@ -91,5 +97,18 @@ func Load() (*Config, error) {
 		TypstBin:      get("TYPST_BIN", "typst"),
 		GitBin:        get("GIT_BIN", "git"),
 		GitHubAPI:     get("GITHUB_API", "https://api.github.com"),
+		StaticDir:     staticDir,
 	}, nil
+}
+
+// defaultStaticDir prefiere public/ junto al ejecutable (lo que genera build.sh)
+// y, si no existe, el build de desarrollo en ../frontend/dist.
+func defaultStaticDir() string {
+	if exe, err := os.Executable(); err == nil {
+		dir := filepath.Join(filepath.Dir(exe), "public")
+		if st, err := os.Stat(filepath.Join(dir, "index.html")); err == nil && !st.IsDir() {
+			return dir
+		}
+	}
+	return "../frontend/dist"
 }

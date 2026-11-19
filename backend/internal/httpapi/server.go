@@ -32,6 +32,7 @@ type Options struct {
 	TypstBin  string
 	GitBin    string
 	GitHubAPI string
+	StaticDir string // frontend compilado (vacío o sin index.html: no se sirve)
 }
 
 type Server struct {
@@ -104,6 +105,15 @@ func (s *Server) Routes() http.Handler {
 	authed("POST /api/projects/{id}/git/push", s.gitPush)
 	// El WebSocket se autentica con ?token= (ver ws.go).
 	mux.HandleFunc("GET /api/projects/{id}/ws", s.projectWS)
+	// Rutas /api desconocidas: 404 en JSON, nunca el index.html de la SPA.
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
+		writeError(w, http.StatusNotFound, "ruta no encontrada")
+	})
+	if h := staticHandler(s.opts.StaticDir); h != nil {
+		mux.Handle("/", h)
+	} else {
+		log.Printf("aviso: no se encontró el frontend en %q (STATIC_DIR); solo se sirve la API", s.opts.StaticDir)
+	}
 	return logRequests(limitBody(mux))
 }
 

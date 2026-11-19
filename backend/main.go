@@ -100,6 +100,7 @@ func serve() {
 	}
 	api := httpapi.New(db, auth.NewIssuer(cfg.JWTSecret, cfg.TokenTTL), httpapi.Options{
 		DataDir: cfg.DataDir, TypstBin: cfg.TypstBin, GitBin: cfg.GitBin, GitHubAPI: cfg.GitHubAPI,
+		StaticDir: cfg.StaticDir,
 	})
 
 	srv := &http.Server{
@@ -111,7 +112,7 @@ func serve() {
 	}
 
 	go func() {
-		log.Printf("API escuchando en %s", cfg.Addr)
+		log.Printf("Servidor escuchando en %s", cfg.Addr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Fatal(err)
 		}

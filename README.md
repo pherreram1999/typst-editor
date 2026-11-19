@@ -66,11 +66,25 @@ npm run dev                # http://localhost:5173 (proxy de /api y del WebSocke
 
 Para apuntar el proxy a otro backend: `API_TARGET=http://127.0.0.1:18080 npm run dev`.
 
+### Producción
+
+El servidor de Go sirve también el frontend compilado, así que basta un solo proceso. `build.sh` compila todo y deja el resultado en la raíz del repositorio (ignorado por git):
+
+```bash
+./build.sh                    # npm ci + vite build + go build  (--skip-install para no reinstalar node_modules)
+cp backend/.env.example .env  # o copia tu backend/.env; se lee del directorio actual
+./typst-editor                # app + API en http://localhost:8080
+```
+
+Genera `./typst-editor` (binario estático, `CGO_ENABLED=0`; admite `GOOS`/`GOARCH`) y `./public/` (frontend). Con las rutas por defecto, los proyectos se guardan en `./data/`.
+
+Si `STATIC_DIR` está vacío, el servidor usa `public/` junto al ejecutable y, si no existe, `../frontend/dist` (el caso de `go run .` desde `backend/`). Los archivos de `assets/` se envían con caché permanente (llevan hash en el nombre) e `index.html` con `no-cache`. Cualquier ruta que no sea un archivo devuelve `index.html`; las rutas `/api/` desconocidas devuelven 404 en JSON. Si no encuentra `index.html`, avisa al arrancar y solo sirve la API.
+
 ## Configuración (`backend/.env`)
 
 | Variable | Por defecto | Descripción |
 |---|---|---|
-| `ADDR` | `:8080` | Dirección de escucha de la API |
+| `ADDR` | `:8080` | Dirección de escucha (API y frontend) |
 | `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` | `127.0.0.1`, `3306`, `typsteditor`, `typsteditor`, — | Conexión a MariaDB |
 | `JWT_SECRET` | — | Obligatorio, mínimo 32 caracteres (`go run . key:generate`) |
 | `TOKEN_TTL` | `8h` | Duración de la sesión |
@@ -78,6 +92,7 @@ Para apuntar el proxy a otro backend: `API_TARGET=http://127.0.0.1:18080 npm run
 | `DATA_DIR` | `data` | Proyectos (`projects/<id>`, repos git) y compilaciones (`build/<id>`) |
 | `TYPST_BIN`, `GIT_BIN` | `typst`, `git` | Binarios del sistema |
 | `GITHUB_API` | `https://api.github.com` | Cámbiala para GitHub Enterprise (`https://<host>/api/v3`) |
+| `STATIC_DIR` | `public/` junto al ejecutable, o `../frontend/dist` | Frontend compilado que sirve el propio servidor |
 
 Las variables de entorno reales tienen prioridad sobre `.env`.
 

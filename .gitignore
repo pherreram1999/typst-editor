@@ -13,6 +13,11 @@ backend/data/
 *.test
 *.out
 
+# --- Artefactos de build.sh (raíz) ---
+/typst-editor
+/public/
+/data/
+
 # --- Frontend (Node / Vite) ---
 node_modules/
 frontend/dist/
