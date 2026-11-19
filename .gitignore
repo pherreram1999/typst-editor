@@ -1,0 +1,32 @@
+# --- Secretos y configuración local ---
+.env
+.env.*
+!.env.example
+*.local
+.claude/settings.local.json
+
+# --- Backend (Go) ---
+backend/bin/
+backend/backend
+# Proyectos de los usuarios y artefactos de compilación (DATA_DIR)
+backend/data/
+*.test
+*.out
+
+# --- Frontend (Node / Vite) ---
+node_modules/
+frontend/dist/
+.vite/
+
+# --- Logs y temporales ---
+*.log
+npm-debug.log*
+.tmp-*
+
+# --- Editores y sistema ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~
