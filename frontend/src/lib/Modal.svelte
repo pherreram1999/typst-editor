@@ -2,7 +2,9 @@
   import { fade } from 'svelte/transition'
   import { d, modalIn, modalOut } from './motion.js'
 
-  let { open = false, title, onclose, children, wide = false } = $props()
+  // fit: el panel no pasa de la altura de la ventana; el cuerpo es una columna
+  // flex en la que el contenido marca qué zona hace scroll (min-h-0 + overflow-auto).
+  let { open = false, title, onclose, children, wide = false, fit = false } = $props()
 
   const titleId = `modal-${Math.random().toString(36).slice(2, 8)}`
   let panel = $state()
@@ -62,11 +64,11 @@
       role="dialog"
       aria-modal="true"
       aria-labelledby={titleId}
-      class="card relative my-8 w-full {wide === 'xl' ? 'max-w-4xl' : wide ? 'max-w-2xl' : 'max-w-md'} shadow-xl"
+      class="card relative w-full {fit ? 'flex max-h-[calc(100dvh-2rem)] flex-col' : 'my-8'} {wide === 'full' ? 'max-w-[min(96vw,84rem)]' : wide === 'xl' ? 'max-w-4xl' : wide ? 'max-w-2xl' : 'max-w-md'} shadow-xl"
       in:modalIn
       out:modalOut
     >
-      <div class="flex items-center justify-between border-b border-slate-200 px-6 py-4">
+      <div class="flex shrink-0 items-center justify-between border-b border-slate-200 px-6 py-4">
         <h2 id={titleId} class="text-[17px] font-semibold">{title}</h2>
         <button
           type="button"
@@ -78,7 +80,7 @@
             stroke-linecap="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
         </button>
       </div>
-      <div class="p-6">
+      <div class={fit ? 'flex min-h-0 flex-1 flex-col p-6' : 'p-6'}>
         {@render children?.()}
       </div>
     </div>

@@ -23,6 +23,7 @@ import { remoteCursors, setRemoteCursor, removeRemoteCursor } from './cursors.js
 import { wsURL } from '../api.js'
 import { formatKeymap } from './commands.js'
 import { imageHover, imageHoverTheme } from './imageHover.js'
+import { tableHover, tableHoverTheme } from './tableHover.js'
 
 const editorTheme = EditorView.theme({
   // Colores de app.css: cambian con el tema.
@@ -68,6 +69,7 @@ export class CollabSession {
    * @param {() => void} [o.onCite] atajo «insertar cita»
    * @param {(ctx: import('@codemirror/autocomplete').CompletionContext) => any} [o.completeCite] autocompletado tras «@» (solo .typ)
    * @param {object} [o.imageHandlers] tarjeta sobre image("…"): { resolve, onEdit } (ver imageHover.js)
+   * @param {object} [o.tableHandlers] tarjeta sobre #table(…): { onEdit({ from, to }) } (ver tableHover.js)
    * @param {() => void} [o.onDocChange] el texto cambió (edición local o remota, o documento recibido); ver text y loaded
    * @param {(files: File[], at: {pos: number}) => void} [o.onFilesDrop] archivos soltados en el editor (en vez de
    *   insertar su contenido); `at` es la posición donde se soltaron, que se mantiene al día con las ediciones
@@ -105,6 +107,7 @@ export class CollabSession {
       // Atajos de formato por encima de los de basicSetup (p. ej. Mod-i, Mod-u).
       Prec.high(keymap.of(formatKeymap({ image: () => this.onImage?.(), cite: () => this.onCite?.() }))),
       this.imageHandlers ? [imageHover(this.imageHandlers), EditorView.theme(imageHoverTheme)] : [],
+      this.tableHandlers && !this.isBib ? [tableHover(this.tableHandlers), EditorView.theme(tableHoverTheme)] : [],
       this.isBib ? bibLanguage : typstLanguage,
       // Fuente de autocompletado adicional (la de basicSetup consulta languageData).
       !this.isBib && this.completeCite ? EditorState.languageData.of(() => [{ autocomplete: this.completeCite }]) : [],

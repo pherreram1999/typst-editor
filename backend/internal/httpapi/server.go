@@ -119,6 +119,14 @@ func (s *Server) Routes() http.Handler {
 	authed("POST /api/projects/{id}/git/push", s.gitPush)
 	// Descarga directa del navegador: se autentica con un ticket (export.go).
 	mux.HandleFunc("GET /api/projects/{id}/export.zip", s.exportZip)
+	// Enlace de revisión: gestión (autenticada) y lectura pública por token (review.go).
+	authed("GET /api/projects/{id}/review", s.getReview)
+	authed("POST /api/projects/{id}/review", s.publishReview)
+	authed("PUT /api/projects/{id}/review", s.updateReview)
+	authed("DELETE /api/projects/{id}/review", s.deleteReview)
+	mux.HandleFunc("GET /api/review/{token}", s.reviewInfo)
+	mux.HandleFunc("GET /api/review/{token}/pages/{n}", s.reviewPage)
+	mux.HandleFunc("GET /api/review/{token}/document.pdf", s.reviewPDF)
 	// El WebSocket se autentica con ?token= (ver ws.go).
 	mux.HandleFunc("GET /api/projects/{id}/ws", s.projectWS)
 	// Rutas /api desconocidas: 404 en JSON, nunca el index.html de la SPA.

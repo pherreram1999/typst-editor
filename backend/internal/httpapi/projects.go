@@ -503,6 +503,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
 	s.hub.CloseProject(p.ID, "el proyecto se ha eliminado")
 	_ = os.RemoveAll(s.projectDir(p.ID))
 	_ = os.RemoveAll(s.buildDir(p.ID))
+	_ = os.RemoveAll(s.reviewDir(p.ID))
 	s.cache.Delete(p.ID)
 	w.WriteHeader(http.StatusNoContent)
 }

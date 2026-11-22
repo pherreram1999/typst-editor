@@ -17,6 +17,8 @@
   import FileTree from '../lib/workspace/FileTree.svelte'
   import OptimizeModal from '../lib/workspace/OptimizeModal.svelte'
   import ImageModal from '../lib/workspace/ImageModal.svelte'
+  import TableModal from '../lib/workspace/TableModal.svelte'
+  import { tableAt } from '../lib/editor/tablecode.js'
   import { imageURL } from '../lib/workspace/imageCache.js'
   import RepoPicker from '../lib/RepoPicker.svelte'
   import BibEditor from '../lib/bib/BibEditor.svelte'
@@ -115,6 +117,8 @@
           else openImageDialog(target)
         },
       },
+      // Tarjeta sobre #table(…): abrir el editor visual de tablas.
+      tableHandlers: { onEdit: ({ from, to }) => editTable(s, from, to) },
       // Clic en el código: llevar la vista previa a ese punto.
       // Archivos soltados en el código: se pregunta la carpeta.
       onFilesDrop: (list, at) => {
@@ -364,6 +368,51 @@
     if (t.mode === 'replace') insertMedia({ ctx: { path: t.path, replace: { from: t.from, to: t.to } }, items: [{ path: chosen }] })
     else insertMedia({ ctx: { path: t.path, at: t.at }, items: [{ path: chosen, caption }] })
   }
+  // ---------- tablas: insertar (barra) o editar (tarjeta sobre #table, o barra con el cursor dentro) ----------
+  let tableDialog = $state() // TableModal
+  let tableTarget = null // { mode: 'insert', path, at } | { mode: 'edit', path, from, to, src }
+
+  function releaseTable() {
+    releaseTarget(tableTarget)
+    tableTarget = null
+  }
+  function openTableTool(s) {
+    const t = s.path.endsWith('.typ') ? tableAt(s.text, s.cursor) : null
+    if (t) return editTable(s, t.from, t.to)
+    releaseTable()
+    tableTarget = { mode: 'insert', path: s.path, at: s.track(s.cursor) }
+    tableDialog?.openInsert()
+  }
+  function editTable(s, from, to) {
+    const doc = s.view.state.doc
+    const src = doc.sliceString(from, to)
+    const line = doc.lineAt(from)
+    const indent = /^\s*/.exec(line.text)[0]
+    const err = tableDialog?.openEdit(src, indent)
+    if (err) return toast(`No se puede editar esta tabla visualmente: ${err}`, 'error')
+    releaseTable()
+    tableTarget = { mode: 'edit', path: s.path, from: s.track(from), to: s.track(to), src }
+  }
+  function applyTable({ code }) {
+    const t = tableTarget
+    tableTarget = null
+    const s = collab
+    if (!t) return
+    if (!s?.view || s.path !== t.path) {
+      releaseTarget(t)
+      return toast('El archivo de la tabla ya no está abierto: no se aplicaron los cambios', 'error')
+    }
+    if (t.mode === 'insert') s.insertBlock(t.at.pos, '#' + code, [code.length + 1, code.length + 1])
+    else {
+      // Otra persona (o tú) pudo editar la tabla mientras el diálogo estaba abierto.
+      const now = s.view.state.doc.sliceString(t.from.pos, t.to.pos)
+      if (now !== t.src && !confirm('La tabla cambió en el código mientras la editabas. ¿Reemplazarla con tu versión?')) return releaseTarget(t)
+      s.replaceRange(t.from.pos, t.to.pos, code)
+    }
+    releaseTarget(t)
+    pane = 'editor'
+  }
+
   function onTool(id, arg) {
     const s = collab
     const v = s?.view
@@ -380,7 +429,7 @@
       case 'numbered': return cmd.toggleList(v, id)
       case 'image': return insertImage()
       case 'figure': return s.insertBlock(s.cursor, cmd.FIGURE.text.replace('fig-nueva', figureLabel('nueva', s.text)), cmd.FIGURE.select)
-      case 'table': return s.insertBlock(s.cursor, cmd.TABLE.text, cmd.TABLE.select)
+      case 'table': return openTableTool(s)
       case 'math': return cmd.insertMath(v)
       case 'link': return cmd.insertLink(v)
       case 'ref': return cmd.insertRef(v, arg)
@@ -887,6 +936,7 @@
       imageTarget = null
     }}
   />
+  <TableModal bind:this={tableDialog} onapply={applyTable} onclose={releaseTable} />
   <CiteModal
     bind:this={citeDialog}
     projectId={id}

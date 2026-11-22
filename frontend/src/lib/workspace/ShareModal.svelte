@@ -4,6 +4,7 @@
   import { api } from '../api.js'
   import { session } from '../session.svelte.js'
   import Modal from '../Modal.svelte'
+  import ReviewShare from './ReviewShare.svelte'
 
   let { open, project, canManage, onclose, refreshKey = 0 } = $props()
 
@@ -171,7 +172,7 @@
   const suggestions = $derived(results.filter((u) => !memberIds.has(u.id)))
 </script>
 
-<Modal {open} title="Compartir proyecto" {onclose}>
+<Modal {open} title="Compartir proyecto" wide {onclose}>
   <div class="flex flex-col gap-4">
     {#if error}<div class="alert-error">{error}</div>{/if}
     {#if notice}<div class="alert-info">{notice}</div>{/if}
@@ -254,6 +255,8 @@
         </ul>
       {/if}
     </div>
+
+    <ReviewShare {project} {open} />
 
     <div class="border-t border-slate-200 pt-4">
       <p class="mb-2 text-[13px] font-semibold text-slate-800">Exportar</p>

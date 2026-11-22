@@ -193,11 +193,6 @@ export function labelsIn(text) {
   return [...set]
 }
 
-export const TABLE = {
-  text: '#table(\n  columns: 3,\n  table.header[*Columna 1*][*Columna 2*][*Columna 3*],\n  [], [], [],\n)',
-  select: ['#table(\n  columns: 3,\n  table.header[*'.length, '#table(\n  columns: 3,\n  table.header[*Columna 1'.length],
-}
-
 export const FIGURE = {
   text: '#figure(\n  image("ruta/de/la/imagen.png", width: 80%),\n  caption: [Descripción de la figura],\n) <fig-nueva>',
   select: ['#figure(\n  image("'.length, '#figure(\n  image("ruta/de/la/imagen.png'.length],

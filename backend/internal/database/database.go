@@ -110,6 +110,20 @@ var schema = []string{`CREATE TABLE IF NOT EXISTS users (
   CONSTRAINT fk_prefs_folder FOREIGN KEY (folder_id) REFERENCES project_folders(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 	`ALTER TABLE project_folders ADD COLUMN IF NOT EXISTS color VARCHAR(16) NOT NULL DEFAULT 'blue' AFTER name`,
+	// Enlace público de revisión (una compilación guardada por proyecto).
+	`CREATE TABLE IF NOT EXISTS project_reviews (
+  project_id     BIGINT UNSIGNED PRIMARY KEY,
+  token          CHAR(43)     NOT NULL,
+  allow_download TINYINT(1)   NOT NULL DEFAULT 1,
+  created_by     BIGINT UNSIGNED NULL,
+  created_at     TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  compiled_at    TIMESTAMP    NULL,
+  compiled_by    BIGINT UNSIGNED NULL,
+  UNIQUE KEY uq_reviews_token (token),
+  CONSTRAINT fk_reviews_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+  CONSTRAINT fk_reviews_creator FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
+  CONSTRAINT fk_reviews_compiler FOREIGN KEY (compiled_by) REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 }
 
 // Migrate creates the schema and seeds the first administrator if none exists.

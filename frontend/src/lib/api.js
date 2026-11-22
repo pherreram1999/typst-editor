@@ -11,7 +11,8 @@ function onUnauthorized(path) {
   // Token inválido/expirado: cerrar sesión y volver al login.
   if (path !== '/auth/login') {
     clearSession()
-    location.hash = '#/login'
+    // La vista pública de revisión (#/r/…) no necesita sesión: quedarse ahí.
+    if (!location.hash.startsWith('#/r/')) location.hash = '#/login'
   }
 }
 
@@ -124,8 +125,24 @@ export const api = {
   pdf: (id) => requestBlob(`/projects/${id}/pdf`),
   // URL de descarga directa del .zip (ticket de un solo uso, caduca en un minuto).
   exportZipURL: (id) => request('POST', `/projects/${id}/export/ticket`).then((r) => r.url),
+  // Enlace de revisión (una compilación guardada que se comparte con un enlace público).
+  getReview: (id) => request('GET', `/projects/${id}/review`),
+  publishReview: (id, body = {}) => request('POST', `/projects/${id}/review`, body),
+  updateReview: (id, body) => request('PUT', `/projects/${id}/review`, body),
+  deleteReview: (id) => request('DELETE', `/projects/${id}/review`),
 
   gitStatus: (id) => request('GET', `/projects/${id}/git/status`),
   gitPull: (id) => request('POST', `/projects/${id}/git/pull`),
   gitPush: (id, message) => request('POST', `/projects/${id}/git/push`, { message }),
 }
+
+// Lectura pública de un enlace de revisión (sin sesión: un 404 no debe cerrar
+// la sesión de quien sí la tenga).
+export async function reviewInfo(token) {
+  const res = await fetch(`/api/review/${q(token)}`, { headers: { Accept: 'application/json' } })
+  const data = await res.json().catch(() => null)
+  if (!res.ok) throw new ApiError(res.status, data?.error ?? `Error ${res.status}`)
+  return data
+}
+export const reviewPageURL = (token, n, version) => `/api/review/${q(token)}/pages/${n}?v=${version}`
+export const reviewPdfURL = (token) => `/api/review/${q(token)}/document.pdf`
