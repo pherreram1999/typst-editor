@@ -92,6 +92,25 @@ func (c *Client) User(ctx context.Context, token string) (*User, error) {
 	return u, err
 }
 
+// Account es una cuenta pública de GitHub: usuario u organización.
+type Account struct {
+	Login string `json:"login"`
+	Type  string `json:"type"` // "User" u "Organization"
+}
+
+func (a *Account) IsOrg() bool { return a.Type == "Organization" }
+
+// Account busca la cuenta login (usuario u organización).
+func (c *Client) Account(ctx context.Context, token, login string) (*Account, error) {
+	a := &Account{}
+	_, err := c.get(ctx, token, "/users/"+url.PathEscape(login), a)
+	var ge *Error
+	if errors.As(err, &ge) && ge.Status == http.StatusNotFound {
+		return nil, &Error{http.StatusBadRequest, "no existe el usuario u organización de GitHub «" + login + "»"}
+	}
+	return a, err
+}
+
 type apiRepo struct {
 	FullName      string                 `json:"full_name"`
 	Name          string                 `json:"name"`

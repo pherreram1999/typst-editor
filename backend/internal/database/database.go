@@ -43,6 +43,7 @@ var schema = []string{`CREATE TABLE IF NOT EXISTS users (
   user_id     BIGINT UNSIGNED NOT NULL,
   label       VARCHAR(128) NOT NULL DEFAULT '',
   login       VARCHAR(100) NOT NULL,
+  is_org      TINYINT(1)   NOT NULL DEFAULT 0,
   token       VARCHAR(512) NOT NULL,
   created_at  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -69,6 +70,8 @@ var schema = []string{`CREATE TABLE IF NOT EXISTS users (
 	`ALTER TABLE projects ADD COLUMN IF NOT EXISTS github_account_id BIGINT UNSIGNED NULL AFTER owner_id`,
 	`ALTER TABLE projects ADD CONSTRAINT fk_projects_github FOREIGN KEY IF NOT EXISTS (github_account_id) REFERENCES github_accounts(id) ON DELETE SET NULL`,
 	`ALTER TABLE projects DROP COLUMN IF EXISTS git_token`,
+	// Cuentas de organización: login es la organización, no el dueño del token.
+	`ALTER TABLE github_accounts ADD COLUMN IF NOT EXISTS is_org TINYINT(1) NOT NULL DEFAULT 0 AFTER login`,
 	`ALTER TABLE projects ADD COLUMN IF NOT EXISTS is_template TINYINT(1) NOT NULL DEFAULT 0 AFTER git_branch`,
 	`ALTER TABLE projects ADD COLUMN IF NOT EXISTS template_category VARCHAR(64) NOT NULL DEFAULT '' AFTER is_template`,
 	`ALTER TABLE projects ADD COLUMN IF NOT EXISTS template_description VARCHAR(255) NOT NULL DEFAULT '' AFTER template_category`,

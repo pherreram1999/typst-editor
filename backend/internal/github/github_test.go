@@ -40,6 +40,9 @@ func fake(t *testing.T) *Client {
 		}
 		w.Write([]byte("]"))
 	}))
+	mux.HandleFunc("/users/octo-org", auth(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"login":"Octo-Org","type":"Organization"}`)
+	}))
 	mux.HandleFunc("/repos/octo/empty/branches", auth(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusConflict) }))
 	mux.HandleFunc("/repos/octo/full/branches", auth(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `[{"name":"main"},{"name":"dev"}]`)
@@ -59,6 +62,12 @@ func TestClient(t *testing.T) {
 	var ge *Error
 	if !errors.As(err, &ge) || ge.Status != http.StatusUnauthorized {
 		t.Fatalf("token malo: %v", err)
+	}
+	if a, err := c.Account(ctx, "good", "octo-org"); err != nil || !a.IsOrg() || a.Login != "Octo-Org" {
+		t.Fatalf("Account (organización): %+v %v", a, err)
+	}
+	if _, err := c.Account(ctx, "good", "nadie"); !errors.As(err, &ge) || ge.Status != http.StatusBadRequest {
+		t.Fatalf("Account inexistente: %v", err)
 	}
 	repos, err := c.Repos(ctx, "good")
 	if err != nil || len(repos) != 103 {

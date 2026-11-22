@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS github_accounts (
   user_id     BIGINT UNSIGNED NOT NULL,
   label       VARCHAR(128) NOT NULL DEFAULT '',
   login       VARCHAR(100) NOT NULL,
+  -- is_org: login es una organización a la que da acceso el token de un usuario.
+  is_org      TINYINT(1)   NOT NULL DEFAULT 0,
   token       VARCHAR(512) NOT NULL,
   created_at  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,

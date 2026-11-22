@@ -123,6 +123,7 @@
           <div class="min-w-0 flex-1">
             <p class="font-semibold">
               {a.login}
+              {#if a.is_org}<span class="badge ml-1">Organización</span>{/if}
               {#if a.label}<span class="font-normal text-slate-500">· {a.label}</span>{/if}
             </p>
             <p class="text-xs text-slate-500">Token guardado · actualizado el {fmt.format(new Date(a.updated_at))}</p>
@@ -156,8 +157,14 @@
   <form class="flex flex-col gap-4" onsubmit={submit}>
     {#if error}<div class="alert-error">{error}</div>{/if}
     <label class="flex flex-col gap-1.5">
-      <span class="label">Usuario de GitHub</span>
+      <span class="label">Usuario u organización de GitHub</span>
       <input class="input" bind:value={form.login} required disabled={!!editing} autocomplete="off" placeholder="octocat" />
+      {#if !editing}
+        <span class="text-xs text-slate-500">
+          Para una organización, usa el token de un usuario con acceso a ella (en un token fine-grained, elige la
+          organización como <em>Resource owner</em>).
+        </span>
+      {/if}
     </label>
     <label class="flex flex-col gap-1.5">
       <span class="label">{editing ? 'Nuevo token (déjalo vacío para no cambiarlo)' : 'Token de acceso personal'}</span>

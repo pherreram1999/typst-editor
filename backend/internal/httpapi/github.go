@@ -19,6 +19,7 @@ type GitHubAccount struct {
 	ID        int64     `json:"id"`
 	Label     string    `json:"label"`
 	Login     string    `json:"login"`
+	IsOrg     bool      `json:"is_org"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	token     string
@@ -48,8 +49,8 @@ func ghError(w http.ResponseWriter, err error) {
 func (s *Server) ownAccount(r *http.Request, id int64) (*GitHubAccount, error) {
 	a := &GitHubAccount{}
 	err := s.db.QueryRowContext(r.Context(),
-		`SELECT id, label, login, token, created_at, updated_at FROM github_accounts WHERE id = ? AND user_id = ?`,
-		id, currentUser(r).ID).Scan(&a.ID, &a.Label, &a.Login, &a.token, &a.CreatedAt, &a.UpdatedAt)
+		`SELECT id, label, login, is_org, token, created_at, updated_at FROM github_accounts WHERE id = ? AND user_id = ?`,
+		id, currentUser(r).ID).Scan(&a.ID, &a.Label, &a.Login, &a.IsOrg, &a.token, &a.CreatedAt, &a.UpdatedAt)
 	return a, err
 }
 
@@ -73,7 +74,7 @@ func (s *Server) loadAccount(w http.ResponseWriter, r *http.Request) (*GitHubAcc
 
 func (s *Server) listAccounts(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.QueryContext(r.Context(),
-		`SELECT id, label, login, created_at, updated_at FROM github_accounts WHERE user_id = ? ORDER BY login`,
+		`SELECT id, label, login, is_org, created_at, updated_at FROM github_accounts WHERE user_id = ? ORDER BY login`,
 		currentUser(r).ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "error interno")
@@ -83,7 +84,7 @@ func (s *Server) listAccounts(w http.ResponseWriter, r *http.Request) {
 	out := []GitHubAccount{}
 	for rows.Next() {
 		var a GitHubAccount
-		if err := rows.Scan(&a.ID, &a.Label, &a.Login, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		if err := rows.Scan(&a.ID, &a.Label, &a.Login, &a.IsOrg, &a.CreatedAt, &a.UpdatedAt); err != nil {
 			writeError(w, http.StatusInternalServerError, "error interno")
 			return
 		}
@@ -92,8 +93,12 @@ func (s *Server) listAccounts(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// verifyToken comprueba el token contra GitHub y que pertenezca a login (si se indica).
-func (s *Server) verifyToken(w http.ResponseWriter, r *http.Request, login, token string) (*github.User, bool) {
+// verifyToken comprueba el token contra GitHub y que dé acceso a login: o bien
+// login es el usuario dueño del token, o bien una organización (los tokens de
+// GitHub siempre pertenecen a un usuario, también los fine-grained cuyo
+// propietario de recursos es una organización). Devuelve la cuenta con el
+// login canónico.
+func (s *Server) verifyToken(w http.ResponseWriter, r *http.Request, login, token string) (*github.Account, bool) {
 	if token == "" || len(token) > 512 || strings.ContainsAny(token, " \t\r\n") {
 		writeError(w, http.StatusBadRequest, "token inválido")
 		return nil, false
@@ -103,11 +108,19 @@ func (s *Server) verifyToken(w http.ResponseWriter, r *http.Request, login, toke
 		ghError(w, err)
 		return nil, false
 	}
-	if login != "" && !strings.EqualFold(login, u.Login) {
-		writeError(w, http.StatusBadRequest, "el token pertenece al usuario de GitHub «"+u.Login+"», no a «"+login+"»")
+	if strings.EqualFold(login, u.Login) {
+		return &github.Account{Login: u.Login, Type: "User"}, true
+	}
+	acc, err := s.gh.Account(r.Context(), token, login)
+	if err != nil {
+		ghError(w, err)
 		return nil, false
 	}
-	return u, true
+	if !acc.IsOrg() {
+		writeError(w, http.StatusBadRequest, "el token pertenece al usuario de GitHub «"+u.Login+"», no a «"+acc.Login+"»")
+		return nil, false
+	}
+	return acc, true
 }
 
 func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
@@ -129,13 +142,17 @@ func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "descripción demasiado larga (máx. 128)")
 		return
 	}
+	if len(in.Login) > 100 {
+		writeError(w, http.StatusBadRequest, "usuario de GitHub inválido")
+		return
+	}
 	gu, ok := s.verifyToken(w, r, in.Login, in.Token)
 	if !ok {
 		return
 	}
 	res, err := s.db.ExecContext(r.Context(),
-		`INSERT INTO github_accounts (user_id, label, login, token) VALUES (?, ?, ?, ?)`,
-		currentUser(r).ID, in.Label, gu.Login, in.Token)
+		`INSERT INTO github_accounts (user_id, label, login, is_org, token) VALUES (?, ?, ?, ?, ?)`,
+		currentUser(r).ID, in.Label, gu.Login, gu.IsOrg(), in.Token)
 	var me *mysql.MySQLError
 	if errors.As(err, &me) && me.Number == 1062 {
 		writeError(w, http.StatusConflict, "ya tienes registrada la cuenta «"+gu.Login+"»; actualiza su token")
@@ -176,7 +193,12 @@ func (s *Server) updateAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	if in.Token != nil && strings.TrimSpace(*in.Token) != "" {
 		tok := strings.TrimSpace(*in.Token)
-		if _, ok := s.verifyToken(w, r, a.Login, tok); !ok {
+		acc, ok := s.verifyToken(w, r, a.Login, tok)
+		if !ok {
+			return
+		}
+		if acc.IsOrg() != a.IsOrg {
+			writeError(w, http.StatusBadRequest, "el token no corresponde a la cuenta «"+a.Login+"»")
 			return
 		}
 		a.token = tok
@@ -222,6 +244,16 @@ func (s *Server) accountRepos(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		ghError(w, err)
 		return
+	}
+	if a.IsOrg {
+		// El token puede dar acceso a más repositorios; la cuenta muestra solo los de la organización.
+		own := repos[:0]
+		for _, rp := range repos {
+			if strings.EqualFold(rp.Owner, a.Login) {
+				own = append(own, rp)
+			}
+		}
+		repos = own
 	}
 	s.repoCache.Store(a.ID, &repoCacheEntry{at: time.Now(), repos: repos})
 	writeJSON(w, http.StatusOK, repos)
