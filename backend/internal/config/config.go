@@ -22,6 +22,12 @@ type Config struct {
 	GitBin        string
 	GitHubAPI     string
 	StaticDir     string // frontend compilado que sirve el propio servidor
+	// Carpetas de fuentes adicionales para typst, además de las del sistema:
+	// las incluidas en el repositorio (fonts/), las locales del servidor
+	// (DATA_DIR/fonts, p. ej. fuentes con licencia que no se versionan) y las
+	// de FONT_PATHS.
+	FontDirs      []string
+	LocalFontsDir string // DATA_DIR/fonts (también está en FontDirs)
 }
 
 // loadDotEnv reads KEY=VALUE pairs from path without overriding existing env vars.
@@ -85,6 +91,23 @@ func Load() (*Config, error) {
 		return nil, errors.New("STATIC_DIR inválido")
 	}
 
+	localFonts := filepath.Join(dataDir, "fonts")
+	fontDirs := []string{localFonts}
+	if d := defaultFontsDir(); d != "" {
+		if abs, err := filepath.Abs(d); err == nil {
+			fontDirs = append([]string{abs}, fontDirs...)
+		}
+	}
+	for _, d := range filepath.SplitList(os.Getenv("FONT_PATHS")) {
+		if d = strings.TrimSpace(d); d != "" {
+			abs, err := filepath.Abs(d)
+			if err != nil {
+				return nil, errors.New("FONT_PATHS inválido")
+			}
+			fontDirs = append(fontDirs, abs)
+		}
+	}
+
 	return &Config{
 		Addr:          get("ADDR", ":8080"),
 		DSN:           dsn,
@@ -98,6 +121,8 @@ func Load() (*Config, error) {
 		GitBin:        get("GIT_BIN", "git"),
 		GitHubAPI:     get("GITHUB_API", "https://api.github.com"),
 		StaticDir:     staticDir,
+		FontDirs:      fontDirs,
+		LocalFontsDir: localFonts,
 	}, nil
 }
 
@@ -111,4 +136,21 @@ func defaultStaticDir() string {
 		}
 	}
 	return "../frontend/dist"
+}
+
+// defaultFontsDir busca las fuentes incluidas en el repositorio: fonts/ junto
+// al ejecutable (build.sh lo deja en la raíz) o ../fonts al ejecutar desde
+// backend/. Vacío si no hay ninguna.
+func defaultFontsDir() string {
+	var dirs []string
+	if exe, err := os.Executable(); err == nil {
+		dirs = append(dirs, filepath.Join(filepath.Dir(exe), "fonts"))
+	}
+	dirs = append(dirs, "fonts", "../fonts")
+	for _, d := range dirs {
+		if st, err := os.Stat(d); err == nil && st.IsDir() {
+			return d
+		}
+	}
+	return ""
 }

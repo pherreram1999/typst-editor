@@ -173,6 +173,19 @@ export function insertRef(view, label) {
   return insertAt(view, text)
 }
 
+// Inserta una cita en pos (separada con espacios de las palabras vecinas: tras
+// una letra «@» no inicia una referencia, y una letra detrás alargaría la clave).
+export function insertCitation(view, pos, code) {
+  const doc = view.state.doc
+  pos = Math.min(Math.max(pos, 0), doc.length)
+  const prev = doc.sliceString(Math.max(0, pos - 1), pos)
+  const next = doc.sliceString(pos, pos + 1)
+  const text = (prev && /[\p{L}\p{N}_)\]]/u.test(prev) ? ' ' : '') + code + (next && /[\p{L}\p{N}_[(]/u.test(next) ? ' ' : '')
+  view.dispatch({ changes: { from: pos, insert: text }, selection: { anchor: pos + text.length }, scrollIntoView: true, userEvent: 'input' })
+  view.focus()
+  return true
+}
+
 // Etiquetas <…> del documento, para el menú de referencias.
 export function labelsIn(text) {
   const set = new Set()
@@ -231,5 +244,6 @@ export function formatKeymap(handlers) {
     { key: 'Mod-m', run: insertMath },
     { key: 'Mod-k', run: insertLink },
     { key: 'Mod-Alt-i', run: () => (handlers.image?.(), true) },
+    { key: 'Mod-Alt-c', run: () => (handlers.cite?.(), true) },
   ]
 }

@@ -5,15 +5,19 @@
   // iconos según el tipo de archivo.
   let { projectId, files, currentPath, mainFile, peopleIn = () => [], onopen, onremove, onreplace, ondropfiles } = $props()
 
-  const KEY = `typsteditor.tree.${projectId}`
-  function loadCollapsed() {
+  const KEY = $derived(`typsteditor.tree.${projectId}`)
+  function loadCollapsed(key) {
     try {
-      return new Set(JSON.parse(localStorage.getItem(KEY)) ?? [])
+      return new Set(JSON.parse(localStorage.getItem(key)) ?? [])
     } catch {
       return new Set()
     }
   }
-  let collapsed = $state(loadCollapsed()) // rutas de carpetas plegadas
+  let collapsed = $state(new Set()) // rutas de carpetas plegadas
+  // Se carga antes del primer pintado y de nuevo si cambia el proyecto.
+  $effect.pre(() => {
+    collapsed = loadCollapsed(KEY)
+  })
   let query = $state('')
 
   function save() {

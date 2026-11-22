@@ -36,3 +36,16 @@ export function modalOut() {
     css: (t) => `opacity:${t}; transform: scale(${0.98 + 0.02 * t})`,
   }
 }
+
+// Panel lateral (drawer): entra y sale deslizándose desde la derecha.
+export function drawerIn() {
+  return {
+    duration: d(260),
+    easing: cubicOut,
+    css: (t, u) => `transform: translateX(${u * 100}%)`,
+  }
+}
+
+export function drawerOut() {
+  return { duration: d(180), css: (t, u) => `transform: translateX(${u * 100}%)` }
+}

@@ -101,12 +101,21 @@ func (h *Hub) Rev(projectID int64) int64 {
 }
 
 // BumpRev marca el proyecto como modificado y avisa a todos sus peers.
-func (h *Hub) BumpRev(projectID int64, files bool) {
+func (h *Hub) BumpRev(projectID int64, files bool) { h.bumpRev(projectID, files, "") }
+
+// bumpRev es BumpRev con la ruta del documento editado, si el cambio fue
+// solo una edición de texto: la vista previa del navegador ya tiene el texto
+// del archivo que está abierto y solo descarga los demás.
+func (h *Hub) bumpRev(projectID int64, files bool, path string) {
 	h.mu.Lock()
 	h.revs[projectID]++
 	rev := h.revs[projectID]
 	h.mu.Unlock()
-	h.broadcastProject(projectID, nil, mustJSON(map[string]any{"type": "rev", "rev": rev, "files": files}))
+	msg := map[string]any{"type": "rev", "rev": rev, "files": files}
+	if path != "" {
+		msg["path"] = path
+	}
+	h.broadcastProject(projectID, nil, mustJSON(msg))
 }
 
 // LoadText lee y valida un archivo de texto editable.
@@ -225,7 +234,7 @@ func (h *Hub) Push(p *Peer, version int, updates []Update) error {
 	d.scheduleSaveLocked()
 	d.mu.Unlock()
 
-	h.BumpRev(d.projectID, false)
+	h.bumpRev(d.projectID, false, d.path)
 	return nil
 }
 

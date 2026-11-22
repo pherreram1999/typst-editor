@@ -50,6 +50,44 @@
     }))
   })
 
+  // ---------- copiar ----------
+  // Mismo formato que `typst compile --diagnostic-format short`.
+  const lineOf = (d) => `${d.file}:${d.line}:${d.column}: ${d.severity}: ${d.message}`
+  // Lo que se ve: respeta el filtro y el orden del panel.
+  const allText = $derived(rawOutput || groups.flatMap((g) => g.list.map(lineOf)).join('\n'))
+
+  let copied = $state(null) // clave del último elemento copiado ('all' o 'archivo#i')
+  let copyFailed = $state(false)
+  let copiedTimer
+  async function writeClipboard(text) {
+    try {
+      await navigator.clipboard.writeText(text)
+      return true
+    } catch {
+      // Sin contexto seguro (http en la red local) no hay API del portapapeles.
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.setAttribute('readonly', '')
+      ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0'
+      document.body.appendChild(ta)
+      ta.select()
+      let ok = false
+      try {
+        ok = document.execCommand('copy')
+      } catch {}
+      ta.remove()
+      return ok
+    }
+  }
+  async function copy(text, key) {
+    const ok = await writeClipboard(text)
+    copied = key
+    copyFailed = !ok
+    clearTimeout(copiedTimer)
+    copiedTimer = setTimeout(() => (copied = null), 1500)
+  }
+  onDestroy(() => clearTimeout(copiedTimer))
+
   // ---------- redimensionado ----------
   let panel = $state()
   let stopResize
@@ -83,6 +121,16 @@
 </script>
 
 <svelte:window {onkeydown} />
+
+{#snippet copyIcon(done)}
+  {#if done && !copyFailed}
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="text-emerald-600" aria-hidden="true"><path d="M20 6 9 17l-5-5" /></svg>
+  {:else if done}
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" class="text-red-600" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12" /></svg>
+  {:else}
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
+  {/if}
+{/snippet}
 
 <div bind:this={panel} class="flex shrink-0 flex-col border-t border-slate-300 bg-surface text-[13px]">
   {#if open}
@@ -136,6 +184,17 @@
     </button>
 
     <span class="flex-1"></span>
+    {#if open && allText}
+      <button
+        type="button"
+        class="flex h-6 cursor-pointer items-center gap-1 rounded px-1.5 text-slate-600 hover:bg-slate-200/70 hover:text-slate-900"
+        onclick={() => copy(allText, 'all')}
+        title="Copiar todos los problemas visibles"
+      >
+        {@render copyIcon(copied === 'all')}
+        <span class="text-xs">{copied === 'all' ? (copyFailed ? 'No se pudo copiar' : 'Copiado') : 'Copiar todo'}</span>
+      </button>
+    {/if}
     {#if open}
       <button
         type="button"
@@ -182,10 +241,10 @@
               {#if !collapsed[g.file]}
                 <ul>
                   {#each g.list as dg, i (i)}
-                    <li>
+                    <li class="group flex items-start hover:bg-primary-tint">
                       <button
                         type="button"
-                        class="flex w-full cursor-pointer items-start gap-2 py-0.5 pr-3 pl-7 text-left hover:bg-primary-tint"
+                        class="flex min-w-0 flex-1 cursor-pointer items-start gap-2 py-0.5 pr-1 pl-7 text-left"
                         onclick={() => ondiagnostic?.(dg)}
                         title="Ir a {dg.file}:{dg.line}:{dg.column}"
                       >
@@ -196,6 +255,15 @@
                         {/if}
                         <span class="min-w-0 flex-1 text-slate-800">{dg.message}</span>
                         <span class="shrink-0 font-mono text-xs text-slate-500">:{dg.line}:{dg.column}</span>
+                      </button>
+                      <button
+                        type="button"
+                        class="mr-2 flex size-5 shrink-0 cursor-pointer items-center justify-center rounded text-slate-500 hover:bg-slate-200/70 hover:text-slate-900 focus-visible:opacity-100 group-hover:opacity-100 {copied === `${g.file}#${i}` ? 'opacity-100' : 'opacity-0'}"
+                        onclick={() => copy(lineOf(dg), `${g.file}#${i}`)}
+                        title={copied === `${g.file}#${i}` ? (copyFailed ? 'No se pudo copiar' : 'Copiado') : 'Copiar'}
+                        aria-label="Copiar problema"
+                      >
+                        {@render copyIcon(copied === `${g.file}#${i}`)}
                       </button>
                     </li>
                   {/each}

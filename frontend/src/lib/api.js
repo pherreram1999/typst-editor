@@ -39,8 +39,9 @@ async function request(method, path, body) {
 }
 
 // Descarga binaria autenticada (PDF, archivos del proyecto).
-async function requestBlob(path) {
+async function requestBlob(path, init = {}) {
   const res = await fetch(`/api${path}`, {
+    ...init,
     headers: session.token ? { Authorization: `Bearer ${session.token}` } : {},
   })
   if (!res.ok) {
@@ -113,11 +114,16 @@ export const api = {
   },
   optimizeImage: (id, path) => request('POST', `/projects/${id}/images/optimize`, { path }),
   rawFile: (id, path) => requestBlob(`/projects/${id}/raw?path=${q(path)}`),
+  // Texto actual de un archivo (revalidando: la caché del navegador podría estar atrasada).
+  textFile: (id, path) => requestBlob(`/projects/${id}/raw?path=${q(path)}`, { cache: 'no-cache' }).then(({ blob }) => blob.text()),
 
   preview: (id) => request('GET', `/projects/${id}/preview`),
   previewSync: (id) => request('GET', `/projects/${id}/preview/sync`),
+  previewFiles: (id) => request('GET', `/projects/${id}/preview/files`),
   previewPage: (id, hash) => requestBlob(`/projects/${id}/preview/pages/${hash}`),
   pdf: (id) => requestBlob(`/projects/${id}/pdf`),
+  // URL de descarga directa del .zip (ticket de un solo uso, caduca en un minuto).
+  exportZipURL: (id) => request('POST', `/projects/${id}/export/ticket`).then((r) => r.url),
 
   gitStatus: (id) => request('GET', `/projects/${id}/git/status`),
   gitPull: (id) => request('POST', `/projects/${id}/git/pull`),

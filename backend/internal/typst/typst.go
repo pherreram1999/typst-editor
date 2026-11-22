@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -40,6 +41,14 @@ type Compiler struct {
 	Bin   string
 	nice  string        // `nice` del sistema (si existe): typst corre con prioridad baja
 	slots chan struct{} // procesos typst simultáneos en todo el servidor
+
+	// Carpetas de fuentes adicionales (las mismas de TYPST_FONT_PATHS): si
+	// cambia su contenido se rehace el catálogo del navegador.
+	FontDirs []string
+
+	fontsMu  sync.Mutex
+	fonts    *FontCatalog // ver Fonts
+	fontsSig string       // firma de FontDirs con la que se hizo fonts
 }
 
 // New prepara el compilador. Cada typst ya usa todos los núcleos, así que
@@ -47,8 +56,8 @@ type Compiler struct {
 // documento grande puede necesitar varios GB): se limitan a la mitad de los
 // núcleos. Se lanzan con `nice` para que el servidor, el editor y el resto del
 // equipo sigan respondiendo mientras compilan.
-func New(bin string) *Compiler {
-	c := &Compiler{Bin: bin, slots: make(chan struct{}, max(1, runtime.NumCPU()/2))}
+func New(bin string, fontDirs ...string) *Compiler {
+	c := &Compiler{Bin: bin, FontDirs: fontDirs, slots: make(chan struct{}, max(1, runtime.NumCPU()/2))}
 	if p, err := exec.LookPath("nice"); err == nil {
 		c.nice = p
 	}

@@ -1,11 +1,15 @@
 package httpapi
 
 import (
+	"bytes"
+	"compress/gzip"
 	"io/fs"
 	"net/http"
 	"os"
 	"path"
 	"strings"
+	"sync"
+	"time"
 )
 
 // staticHandler sirve el frontend compilado (frontend/dist) desde dir.
@@ -43,6 +47,16 @@ func staticHandler(dir string) http.Handler {
 		if strings.HasPrefix(name, "assets/") {
 			// Vite añade un hash al nombre de los assets: se pueden cachear indefinidamente.
 			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+			if gz := gzipped(fsys, name); gz != nil && strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+				h := w.Header()
+				h.Set("Content-Encoding", "gzip")
+				h.Set("Vary", "Accept-Encoding")
+				if ct := contentTypes[path.Ext(name)]; ct != "" {
+					h.Set("Content-Type", ct)
+				}
+				http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(gz))
+				return
+			}
 		}
 		r2 := r.Clone(r.Context())
 		r2.URL.Path = "/" + name
@@ -58,4 +72,38 @@ func hiddenPath(name string) bool {
 		}
 	}
 	return false
+}
+
+var contentTypes = map[string]string{
+	".js":   "text/javascript; charset=utf-8",
+	".css":  "text/css; charset=utf-8",
+	".wasm": "application/wasm",
+	".svg":  "image/svg+xml",
+	".json": "application/json",
+}
+
+// gzipCache guarda los assets comprimidos (nombre -> []byte, nil si no se
+// comprimen). Los assets llevan hash en el nombre: su contenido no cambia.
+var gzipCache sync.Map
+
+// gzipped devuelve el asset comprimido con gzip, o nil si no conviene (tipos
+// ya comprimidos o archivos pequeños). Se comprime la primera vez que se pide
+// (el compilador WASM de typst pasa de 28 MB a unos 11).
+func gzipped(fsys fs.FS, name string) []byte {
+	if v, ok := gzipCache.Load(name); ok {
+		return v.([]byte)
+	}
+	var out []byte
+	if contentTypes[path.Ext(name)] != "" {
+		if data, err := fs.ReadFile(fsys, name); err == nil && len(data) > 1024 {
+			var buf bytes.Buffer
+			zw, _ := gzip.NewWriterLevel(&buf, gzip.DefaultCompression)
+			zw.Write(data)
+			if zw.Close() == nil && buf.Len() < len(data) {
+				out = buf.Bytes()
+			}
+		}
+	}
+	gzipCache.Store(name, out)
+	return out
 }

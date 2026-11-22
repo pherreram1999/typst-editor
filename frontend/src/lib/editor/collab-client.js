@@ -18,6 +18,7 @@ import { indentWithTab } from '@codemirror/commands'
 import { syntaxHighlighting } from '@codemirror/language'
 import { collab, receiveUpdates, sendableUpdates, getSyncedVersion } from '@codemirror/collab'
 import { typstLanguage, typstHighlight } from './typst-lang.js'
+import { bibLanguage } from './bib-lang.js'
 import { remoteCursors, setRemoteCursor, removeRemoteCursor } from './cursors.js'
 import { wsURL } from '../api.js'
 import { formatKeymap } from './commands.js'
@@ -43,6 +44,14 @@ const editorTheme = EditorView.theme({
   '.cm-foldPlaceholder': { backgroundColor: 'var(--color-slate-100)', borderColor: 'var(--color-slate-300)', color: 'var(--color-slate-600)' },
 })
 
+// Latido: cada HEARTBEAT_EVERY se envía un ping; si en HEARTBEAT_TIMEOUT no
+// llega ningún mensaje, la conexión se da por muerta y se reconecta.
+const HEARTBEAT_EVERY = 20000
+const HEARTBEAT_TIMEOUT = 8000
+// Reintentos: 250 ms, 500 ms, 1 s, 2 s y luego cada ~3 s (con algo de azar
+// para que los clientes no lleguen todos a la vez tras reiniciar el servidor).
+const backoff = (n) => Math.min(3000, 250 * 2 ** n) * (0.8 + Math.random() * 0.4)
+
 export class CollabSession {
   /**
    * @param {object} o
@@ -56,7 +65,10 @@ export class CollabSession {
    * @param {(pos: {line: number, column: number}) => void} [o.onCursorClick] clic que deja el cursor (sin selección)
    * @param {(state: EditorState) => void} [o.onState] estado tras cada cambio o movimiento del cursor (barra de herramientas)
    * @param {() => void} [o.onImage] atajo «insertar imagen»
+   * @param {() => void} [o.onCite] atajo «insertar cita»
+   * @param {(ctx: import('@codemirror/autocomplete').CompletionContext) => any} [o.completeCite] autocompletado tras «@» (solo .typ)
    * @param {object} [o.imageHandlers] tarjeta sobre image("…"): { resolve, onEdit } (ver imageHover.js)
+   * @param {() => void} [o.onDocChange] el texto cambió (edición local o remota, o documento recibido); ver text y loaded
    * @param {(files: File[], at: {pos: number}) => void} [o.onFilesDrop] archivos soltados en el editor (en vez de
    *   insertar su contenido); `at` es la posición donde se soltaron, que se mantiene al día con las ediciones
    */
@@ -70,6 +82,19 @@ export class CollabSession {
     this.forceInit = false
     this.cursorTimer = null
     this.tracked = new Set() // posiciones que se actualizan con cada cambio (track)
+    this.lastMsg = 0
+    // Al volver a la pestaña, recuperar la red o el foco: reconectar ya en vez
+    // de esperar al temporizador (Chrome lo retrasa en pestañas ocultas) y
+    // comprobar que una conexión «abierta» sigue viva (suspensión, cambio de red).
+    this.wake = () => {
+      if (document.visibilityState === 'hidden') return
+      if (this.ws) this.probe(5000)
+      else this.reconnectNow()
+    }
+    window.addEventListener('online', this.wake)
+    window.addEventListener('focus', this.wake)
+    document.addEventListener('visibilitychange', this.wake)
+    this.heartbeat = setInterval(() => this.probe(HEARTBEAT_TIMEOUT), HEARTBEAT_EVERY)
     this.connect()
   }
 
@@ -78,9 +103,11 @@ export class CollabSession {
       basicSetup,
       keymap.of([indentWithTab]),
       // Atajos de formato por encima de los de basicSetup (p. ej. Mod-i, Mod-u).
-      Prec.high(keymap.of(formatKeymap({ image: () => this.onImage?.() }))),
+      Prec.high(keymap.of(formatKeymap({ image: () => this.onImage?.(), cite: () => this.onCite?.() }))),
       this.imageHandlers ? [imageHover(this.imageHandlers), EditorView.theme(imageHoverTheme)] : [],
-      typstLanguage,
+      this.isBib ? bibLanguage : typstLanguage,
+      // Fuente de autocompletado adicional (la de basicSetup consulta languageData).
+      !this.isBib && this.completeCite ? EditorState.languageData.of(() => [{ autocomplete: this.completeCite }]) : [],
       syntaxHighlighting(typstHighlight),
       EditorView.lineWrapping,
       editorTheme,
@@ -116,6 +143,7 @@ export class CollabSession {
       EditorView.updateListener.of((u) => {
         if (u.docChanged) for (const t of this.tracked) t.pos = u.changes.mapPos(t.pos)
         if (u.docChanged) this.push()
+        if (u.docChanged) this.onDocChange?.()
         if (u.docChanged || u.selectionSet) this.scheduleCursor()
         if (u.docChanged || u.selectionSet) this.notifyState()
       }),
@@ -131,21 +159,55 @@ export class CollabSession {
     this.inflight = false
     ws.onopen = () => {
       this.retry = 0
+      this.lastMsg = Date.now()
     }
-    ws.onmessage = (ev) => this.handle(JSON.parse(ev.data))
-    ws.onclose = (ev) => {
-      if (this.ws !== ws) return
-      this.ws = null
-      if (this.destroyed || this.closedByServer) return
-      // Un cambio rechazado por el servidor (1008) obliga a recargar desde cero.
-      if (ev.code === 1008) {
-        this.forceInit = true
-        if (ev.reason) this.onWarning?.(ev.reason)
-      }
-      this.onStatus?.('offline')
-      const delay = Math.min(10000, 500 * 2 ** this.retry++)
-      this.reconnectTimer = setTimeout(() => this.connect(), delay)
+    ws.onmessage = (ev) => {
+      this.lastMsg = Date.now()
+      this.handle(JSON.parse(ev.data))
     }
+    ws.onclose = (ev) => this.dropped(ws, ev.code, ev.reason)
+  }
+
+  // La conexión ws terminó (cierre normal o dada por muerta): reintentar.
+  dropped(ws, code, reason) {
+    if (this.ws !== ws) return
+    this.ws = null
+    clearTimeout(this.probeTimer)
+    if (this.destroyed || this.closedByServer) return
+    // Un cambio rechazado por el servidor (1008) obliga a recargar desde cero.
+    if (code === 1008) {
+      this.forceInit = true
+      if (reason) this.onWarning?.(reason)
+    }
+    this.onStatus?.('offline')
+    clearTimeout(this.reconnectTimer)
+    this.reconnectTimer = setTimeout(() => this.connect(), backoff(this.retry++))
+  }
+
+  // Reconectar sin esperar al siguiente reintento.
+  reconnectNow() {
+    if (this.destroyed || this.closedByServer || this.ws) return
+    clearTimeout(this.reconnectTimer)
+    this.retry = 0
+    this.connect()
+  }
+
+  // Comprueba que la conexión responde: si en `timeout` ms no llega ningún
+  // mensaje (el servidor contesta al ping), se abandona y se reconecta. Sin
+  // esto, una conexión muerta (suspensión, cambio de red) puede tardar minutos
+  // en cerrarse y el editor seguiría diciendo «Sincronizado».
+  probe(timeout) {
+    const ws = this.ws
+    if (!ws || ws.readyState !== WebSocket.OPEN || this.probeTimer) return
+    const sent = Date.now()
+    this.send({ type: 'ping' })
+    this.probeTimer = setTimeout(() => {
+      this.probeTimer = null
+      if (this.ws !== ws || this.lastMsg >= sent) return
+      ws.onclose = null
+      ws.close()
+      this.dropped(ws, 1006, '')
+    }, timeout)
   }
 
   send(msg) {
@@ -167,6 +229,7 @@ export class CollabSession {
         this.forceInit = false
         this.onStatus?.('online')
         this.onSynced?.()
+        this.onDocChange?.()
         this.scheduleCursor()
         this.notifyState()
         break
@@ -212,6 +275,8 @@ export class CollabSession {
         this.view.dispatch({ effects: setRemoteCursor.of({ ...msg, anchor, head }) })
         break
       }
+      case 'pong': // latido: basta con haber recibido algo (lastMsg)
+        break
       case 'cursor-leave':
         this.view?.dispatch({ effects: removeRemoteCursor.of(msg.peer) })
         break
@@ -270,6 +335,18 @@ export class CollabSession {
     })
   }
 
+  get isBib() {
+    return /\.bib$/i.test(this.path)
+  }
+
+  // Cambios hechos desde fuera del editor (editor visual de .bib): sin mover
+  // el cursor ni el foco; entran en el historial (Ctrl+Z) como cualquier otro.
+  applyChanges(changes) {
+    if (!this.view || !changes.length) return false
+    this.view.dispatch({ changes, userEvent: 'input.visual' })
+    return true
+  }
+
   // Reemplaza [from, to) y deja el cursor al final.
   replaceRange(from, to, text) {
     if (!this.view) return false
@@ -284,6 +361,11 @@ export class CollabSession {
 
   get text() {
     return this.view ? this.view.state.doc.toString() : ''
+  }
+
+  // Ya se recibió el documento (antes, text está vacío aunque no lo esté).
+  get loaded() {
+    return !!this.view
   }
 
   // Inserta un bloque (p. ej. una figura) separado por líneas en blanco:
@@ -336,6 +418,11 @@ export class CollabSession {
     this.destroyed = true
     clearTimeout(this.reconnectTimer)
     clearTimeout(this.cursorTimer)
+    clearTimeout(this.probeTimer)
+    clearInterval(this.heartbeat)
+    window.removeEventListener('online', this.wake)
+    window.removeEventListener('focus', this.wake)
+    document.removeEventListener('visibilitychange', this.wake)
     this.ws?.close()
     this.ws = null
     this.view?.destroy()

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"typsteditor/backend/internal/auth"
@@ -32,7 +33,8 @@ type Options struct {
 	TypstBin  string
 	GitBin    string
 	GitHubAPI string
-	StaticDir string // frontend compilado (vacío o sin index.html: no se sirve)
+	StaticDir string   // frontend compilado (vacío o sin index.html: no se sirve)
+	FontDirs  []string // carpetas de fuentes adicionales (ya en TYPST_FONT_PATHS)
 }
 
 type Server struct {
@@ -43,14 +45,16 @@ type Server struct {
 	typst     *typst.Compiler
 	git       *gitsync.Git
 	gh        *github.Client
-	locks     sync.Map // projectID -> *sync.Mutex
-	cache     sync.Map // projectID -> *compileCache
-	repoCache sync.Map // githubAccountID -> *repoCacheEntry
+	locks     sync.Map     // projectID -> *sync.Mutex
+	cache     sync.Map     // projectID -> *compileCache
+	fontSig   atomic.Value // firma de las carpetas de fuentes con la que se llenó cache
+	repoCache sync.Map     // githubAccountID -> *repoCacheEntry
+	tickets   ticketStore  // descargas de un solo uso (export.go)
 }
 
 func New(db *sql.DB, tokens *auth.Issuer, opts Options) *Server {
 	s := &Server{db: db, tokens: tokens, opts: opts,
-		typst: typst.New(opts.TypstBin), git: &gitsync.Git{Bin: opts.GitBin}, gh: github.New(opts.GitHubAPI)}
+		typst: typst.New(opts.TypstBin, opts.FontDirs...), git: &gitsync.Git{Bin: opts.GitBin}, gh: github.New(opts.GitHubAPI)}
 	s.hub = collab.NewHub(s.projectDir)
 	return s
 }
@@ -84,7 +88,14 @@ func (s *Server) Routes() http.Handler {
 	authed("GET /api/projects/{id}/preview", s.preview)
 	authed("GET /api/projects/{id}/preview/pages/{hash}", s.previewPage)
 	authed("GET /api/projects/{id}/preview/sync", s.previewSync)
+	authed("GET /api/projects/{id}/preview/files", s.previewFiles)
+	authed("GET /api/projects/{id}/preview/file", s.previewFile)
+	authed("GET /api/typst/fonts", s.typstFonts)
+	authed("GET /api/typst/fonts/meta", s.typstFontsMeta)
+	authed("GET /api/typst/fonts/{id}", s.typstFont)
+	authed("GET /api/typst/packages/{ns}/{name}/{version}", s.typstPackage)
 	authed("GET /api/projects/{id}/pdf", s.pdf)
+	authed("POST /api/projects/{id}/export/ticket", s.exportTicket)
 	authed("GET /api/users/search", s.searchUsers)
 	authed("GET /api/templates", s.listTemplates)
 	authed("POST /api/projects/{id}/clone", s.cloneProject)
@@ -106,6 +117,8 @@ func (s *Server) Routes() http.Handler {
 	authed("GET /api/projects/{id}/git/status", s.gitStatus)
 	authed("POST /api/projects/{id}/git/pull", s.gitPull)
 	authed("POST /api/projects/{id}/git/push", s.gitPush)
+	// Descarga directa del navegador: se autentica con un ticket (export.go).
+	mux.HandleFunc("GET /api/projects/{id}/export.zip", s.exportZip)
 	// El WebSocket se autentica con ?token= (ver ws.go).
 	mux.HandleFunc("GET /api/projects/{id}/ws", s.projectWS)
 	// Rutas /api desconocidas: 404 en JSON, nunca el index.html de la SPA.

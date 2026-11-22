@@ -25,6 +25,8 @@
     "@codemirror/state": "^6.7.6",
     "@codemirror/view": "^6.43.15",
     "@lezer/highlight": "^1.2.5",
+    "@myriaddreamin/typst-ts-renderer": "0.8.0-rc4",
+    "@myriaddreamin/typst-ts-web-compiler": "0.8.0-rc4",
     "@uppy/core": "^6.3.2",
     "@uppy/dashboard": "^6.0.3",
     "@uppy/locales": "^5.3.2",

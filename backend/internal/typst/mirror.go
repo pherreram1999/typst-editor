@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -236,4 +237,54 @@ func copyIfChanged(orig, target string) error {
 		}
 	}
 	return writeAtomic(target, b)
+}
+
+// MirrorFile es un archivo del espejo de la vista previa, tal como lo ve el
+// compilador del navegador.
+type MirrorFile struct {
+	Path string `json:"path"`
+	V    string `json:"v"` // cambia cuando cambia el contenido (tamaño y fecha)
+}
+
+// MaxBrowserFile es el tamaño máximo de un archivo que se ofrece al
+// compilador del navegador (los mayores no se descargan).
+const MaxBrowserFile = 48 << 20
+
+// PreviewFiles actualiza el espejo de la vista previa y lista sus archivos
+// (con las imágenes ya reducidas). Devuelve también la ruta del espejo, de
+// donde se sirven.
+func (c *Compiler) PreviewFiles(root, main, outDir string) (string, []MirrorFile, error) {
+	mirror, err := previewRoot(outDir)
+	if err != nil {
+		return "", nil, err
+	}
+	if err := syncMirror(root, mirror, main); err != nil {
+		return "", nil, err
+	}
+	var files []MirrorFile
+	err = filepath.WalkDir(mirror, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if p == mirror {
+			return nil
+		}
+		if strings.HasPrefix(d.Name(), ".") {
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		info, err := os.Stat(p) // sigue el enlace al original
+		if err != nil || !info.Mode().IsRegular() || info.Size() > MaxBrowserFile {
+			return nil
+		}
+		rel, _ := filepath.Rel(mirror, p)
+		files = append(files, MirrorFile{filepath.ToSlash(rel), strconv.FormatInt(info.Size(), 36) + "-" + strconv.FormatInt(info.ModTime().UnixNano(), 36)})
+		return nil
+	})
+	return mirror, files, err
 }

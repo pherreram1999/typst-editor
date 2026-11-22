@@ -5,6 +5,7 @@
   import { session } from '../lib/session.svelte.js'
   import { d } from '../lib/motion.js'
   import Modal from '../lib/Modal.svelte'
+  import Drawer from '../lib/Drawer.svelte'
   import { CollabSession } from '../lib/editor/collab-client.js'
   import { relativePath, figureLabel, mediaSnippet, resolvePath, escapeString } from '../lib/editor/snippets.js'
   import EditorToolbar from '../lib/editor/EditorToolbar.svelte'
@@ -18,6 +19,10 @@
   import ImageModal from '../lib/workspace/ImageModal.svelte'
   import { imageURL } from '../lib/workspace/imageCache.js'
   import RepoPicker from '../lib/RepoPicker.svelte'
+  import BibEditor from '../lib/bib/BibEditor.svelte'
+  import CiteModal from '../lib/bib/CiteModal.svelte'
+  import { citeCompletion } from '../lib/bib/complete.js'
+  import { loadLibrary, invalidateText } from '../lib/bib/library.js'
 
   let { id } = $props()
 
@@ -28,6 +33,10 @@
   let status = $state('connecting') // connecting | online | offline | closed
   let users = $state([])
   let refreshKey = $state(0)
+  // Vista previa en el navegador: versión del texto del archivo abierto y
+  // cambios en otros archivos (de otros usuarios, subidas, git…).
+  let liveVersion = $state(0)
+  let remoteKey = $state(0)
   let tab = $state('preview') // preview | pdf
   let pane = $state('editor') // en pantallas pequeñas: editor | output
   let showFiles = $state(true)
@@ -43,6 +52,7 @@
   const outputVisible = $derived(wide || pane === 'output')
   let host = $state()
   let collab = null
+  let live = $state.raw(null) // la misma sesión, reactiva (editor visual de .bib)
   let pendingGoto = null
   let shareOpen = $state(false)
   let membersKey = $state(0)
@@ -87,7 +97,11 @@
       path,
       parent: host,
       onState: (st) => (fmt = cmd.activeFormats(st)),
+      onDocChange: () => liveVersion++,
       onImage: () => insertImage(),
+      onCite: () => openCite(),
+      // «@» en el código: claves de la bibliografía, las más recientes primero.
+      completeCite: citeCompletion(() => libraryItems()),
       // Tarjeta sobre image("…"): miniatura y acciones para cambiarla.
       imageHandlers: {
         resolve: (rel) => {
@@ -135,6 +149,12 @@
         }
         else if (msg.type === 'rev') {
           refreshKey++
+          // Textos guardados para la bibliografía (citas, autocompletado).
+          if (msg.files || !msg.path) invalidateText(id)
+          else invalidateText(id, msg.path)
+          if (msg.files || /\.(bib|typ)$/i.test(msg.path ?? '')) libCache = null
+          // Los cambios en el archivo abierto ya llegan por el editor.
+          if (msg.files || msg.path !== path) remoteKey++
           if (msg.files) {
             loadFiles().catch(() => {})
             loadProject().catch(() => {})
@@ -144,9 +164,12 @@
       onWarning: (m) => toast(m, 'error'),
     })
     collab = s
+    live = s
+    libCache = null
     return () => {
       s.destroy()
       if (collab === s) collab = null
+      if (live === s) live = null
     }
   })
 
@@ -165,6 +188,92 @@
   const current = $derived(files.find((f) => f.path === currentPath))
   const canManage = $derived(project && (session.user.role === 'admin' || session.user.id === project.owner_id))
   const pdfName = $derived((project?.main_file ?? 'documento.typ').split('/').pop().replace(/\.typ$/, '') + '.pdf')
+
+  // ---------- bibliografía ----------
+  const isBib = $derived(/\.bib$/i.test(currentPath))
+  let bibMode = $state(localStorage.getItem('typsteditor.bibmode') === 'code' ? 'code' : 'visual') // visual | code
+  let bibFocus = $state('') // clave a mostrar al abrir el editor visual
+  let bibEditor = $state()
+  function setBibMode(m) {
+    bibMode = m
+    try {
+      localStorage.setItem('typsteditor.bibmode', m)
+    } catch {
+      /* sin almacenamiento */
+    }
+  }
+  // Del editor visual al código, en la línea indicada.
+  function showBibCode(line) {
+    setBibMode('code')
+    setTimeout(() => line && collab?.goto(line))
+  }
+
+  // Entradas de todos los .bib, para el autocompletado (se recargan con «rev»).
+  let libCache = null
+  function libraryItems() {
+    libCache ??= loadLibrary(id, files, collab).then((r) => r.items)
+    libCache.catch(() => (libCache = null))
+    return libCache
+  }
+
+  let citeDialog = $state()
+  let citeTarget = null // { path, at }
+  function releaseCite() {
+    if (citeTarget) collab?.untrack(citeTarget.at)
+    citeTarget = null
+  }
+  function openCite() {
+    const s = collab
+    if (!s?.view || isBib) return
+    releaseCite()
+    citeTarget = { path: s.path, at: s.track(s.cursor) }
+    citeDialog?.openFor()
+  }
+  function insertCite(code) {
+    const s = collab
+    const t = citeTarget
+    citeTarget = null
+    if (!s?.view || !t || t.path !== s.path) {
+      toast('El archivo cambió: vuelve a insertar la cita', 'error')
+      return
+    }
+    cmd.insertCitation(s.view, t.at.pos, code)
+    s.untrack(t.at)
+    pane = 'editor'
+  }
+  // Abrir un .bib en el editor visual (sin ruta: crear referencias.bib).
+  async function manageBib(path, key = '') {
+    releaseCite()
+    try {
+      if (!path) {
+        const f = await api.createFile(id, 'referencias.bib')
+        await loadFiles()
+        path = f.path
+      }
+    } catch (e) {
+      toast(e.message, 'error')
+      return
+    }
+    setBibMode('visual')
+    pane = 'editor'
+    if (currentPath === path && bibEditor) {
+      if (key) bibEditor.reveal(key)
+      return
+    }
+    bibFocus = key
+    currentPath = path
+  }
+  // Enlazar un .bib al final del archivo principal abierto.
+  function addBibliography(bibPath) {
+    const s = collab
+    if (!s?.view) return false
+    const doc = s.view.state.doc
+    const tail = doc.toString().match(/\s*$/)[0]
+    const text = `${doc.length ? (tail.includes('\n\n') ? '' : tail.includes('\n') ? '\n' : '\n\n') : ''}#bibliography("${escapeString(relativePath(s.path, bibPath))}")\n`
+    s.view.dispatch({ changes: { from: doc.length, insert: text }, userEvent: 'input' })
+    toast(`Se añadió #bibliography al final de ${s.path}`)
+    return true
+  }
 
   function openFile(f) {
     if (f.editable) {
@@ -275,6 +384,7 @@
       case 'math': return cmd.insertMath(v)
       case 'link': return cmd.insertLink(v)
       case 'ref': return cmd.insertRef(v, arg)
+      case 'cite': return openCite()
       case 'search': return cmd.runSearch(v)
     }
   }
@@ -533,7 +643,7 @@
           {/each}
         </div>
         <div class="flex items-center gap-1.5">
-          <button type="button" class="btn-secondary btn-sm" onclick={() => (shareOpen = true)} title="Invitar usuarios y ver quién tiene acceso">
+          <button type="button" class="btn-secondary btn-sm" onclick={() => (shareOpen = true)} title="Invitar usuarios, ver quién tiene acceso y exportar en PDF o .zip">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M19 8v6M22 11h-6" /></svg>
             Compartir{#if project.members > 0}<span class="badge !bg-primary-soft !px-1.5 !py-0 text-primary">{project.members}</span>{/if}
           </button>
@@ -640,15 +750,49 @@
             </div>
           </div>
         {/if}
-        <EditorToolbar
-          file={current && !current.editable ? `${currentPath} (no editable)` : currentPath}
-          active={fmt}
-          disabled={!current?.editable || status !== 'online'}
-          labels={() => cmd.labelsIn(collab?.text ?? '')}
-          onaction={onTool}
-        />
+        {#if isBib}
+          <div class="flex h-10 shrink-0 items-center gap-2 border-b border-slate-200 bg-surface pr-2 pl-3">
+            <span class="min-w-0 flex-1 truncate font-mono text-xs text-slate-600" title={currentPath}>{currentPath}</span>
+            <div class="flex rounded-lg bg-slate-100 p-0.5" role="tablist" aria-label="Modo de edición de la bibliografía">
+              {#each [['visual', 'Visual', 'Gestionar las referencias con formularios'], ['code', 'Código', 'Editar el BibTeX como texto']] as [k, label, title]}
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={bibMode === k}
+                  {title}
+                  class="h-7 cursor-pointer rounded-md px-3 text-[13px] font-medium {bibMode === k ? 'bg-surface text-primary shadow-sm' : 'text-slate-500 hover:text-slate-900'}"
+                  onclick={() => setBibMode(k)}>{label}</button
+                >
+              {/each}
+            </div>
+          </div>
+        {:else}
+          <EditorToolbar
+            file={current && !current.editable ? `${currentPath} (no editable)` : currentPath}
+            active={fmt}
+            disabled={!current?.editable || status !== 'online'}
+            labels={() => cmd.labelsIn(collab?.text ?? '')}
+            onaction={onTool}
+          />
+        {/if}
         <div class="relative min-h-0 flex-1">
-          <div bind:this={host} class="absolute inset-0"></div>
+          <div bind:this={host} class="absolute inset-0 {isBib && bibMode === 'visual' ? 'invisible' : ''}"></div>
+          {#if isBib && bibMode === 'visual' && live}
+            <div class="absolute inset-0 z-10">
+              {#key live}
+                <BibEditor
+                  bind:this={bibEditor}
+                  projectId={id}
+                  path={currentPath}
+                  session={live}
+                  version={liveVersion}
+                  focusKey={bibFocus}
+                  onshowcode={showBibCode}
+                  ontoast={toast}
+                />
+              {/key}
+            </div>
+          {/if}
           {#if !currentPath}
             <p class="absolute inset-0 flex items-center justify-center text-sm text-slate-500">Selecciona un archivo para editarlo.</p>
           {/if}
@@ -684,7 +828,15 @@
         </div>
         <div class="min-h-0 flex-1">
           <div class="h-full {tab === 'preview' ? '' : 'hidden'}">
-            <Preview bind:this={preview} projectId={id} {refreshKey} active={outputVisible} onresult={(r) => (compileResult = r)} onjump={onDiagnostic} />
+            <Preview
+              bind:this={preview}
+              projectId={id}
+              {refreshKey}
+              {remoteKey}
+              livePath={currentPath}
+              {liveVersion}
+              liveText={() => (collab?.loaded ? collab.text : null)}
+              active={outputVisible} onresult={(r) => (compileResult = r)} onjump={onDiagnostic} />
           </div>
           <div class="h-full {tab === 'pdf' ? '' : 'hidden'}">
             <PdfView projectId={id} {refreshKey} active={tab === 'pdf' && outputVisible} filename={pdfName} />
@@ -734,6 +886,16 @@
       releaseTarget(imageTarget)
       imageTarget = null
     }}
+  />
+  <CiteModal
+    bind:this={citeDialog}
+    projectId={id}
+    {files}
+    live={() => collab}
+    oninsert={insertCite}
+    onmanage={manageBib}
+    onaddlink={currentPath === project.main_file ? addBibliography : null}
+    onclose={releaseCite}
   />
   <OptimizeModal
     projectId={id}
@@ -804,8 +966,8 @@
     </form>
   </Modal>
 
-  <Modal open={settingsOpen} title="Ajustes del proyecto" wide onclose={() => !savingSettings && (settingsOpen = false)}>
-    <form class="flex flex-col gap-4" onsubmit={saveSettings}>
+  <Drawer open={settingsOpen} title="Ajustes del proyecto" onclose={() => !savingSettings && (settingsOpen = false)}>
+    <form id="project-settings" class="flex flex-col gap-4" onsubmit={saveSettings}>
       {#if settingsError}<div class="alert-error">{settingsError}</div>{/if}
       {#if !canManage}
         <div class="alert-info">Solo el propietario ({project.owner_name}) o un administrador puede cambiar los ajustes.</div>
@@ -891,21 +1053,23 @@
           </div>
         </div>
       </fieldset>
-      <div class="flex flex-wrap items-center justify-between gap-2 pt-2">
-        {#if canManage}
-          <button type="button" class="btn-secondary !border-red-200 !text-red-700 hover:!bg-red-50" onclick={deleteProject}>Eliminar proyecto</button>
-        {:else}
-          <span></span>
-        {/if}
-        <div class="flex gap-2">
-          <button type="button" class="btn-secondary" onclick={() => (settingsOpen = false)}>Cerrar</button>
-          {#if canManage}
-            <button class="btn-primary" disabled={savingSettings}>{savingSettings ? 'Guardando…' : 'Guardar'}</button>
-          {/if}
+      {#if canManage}
+        <div class="mt-2 rounded-lg border border-red-200 p-4">
+          <p class="text-[13px] font-semibold text-red-700">Zona de peligro</p>
+          <p class="mt-1 mb-3 text-sm text-slate-600">Eliminar el proyecto borra sus archivos para todos los miembros. No se puede deshacer.</p>
+          <button type="button" class="btn-secondary btn-sm !border-red-200 !text-red-700 hover:!bg-red-50" onclick={deleteProject}>Eliminar proyecto</button>
         </div>
-      </div>
+      {/if}
     </form>
-  </Modal>
+    {#snippet footer()}
+      <div class="flex justify-end gap-2">
+        <button type="button" class="btn-secondary" onclick={() => (settingsOpen = false)}>Cerrar</button>
+        {#if canManage}
+          <button form="project-settings" class="btn-primary" disabled={savingSettings}>{savingSettings ? 'Guardando…' : 'Guardar'}</button>
+        {/if}
+      </div>
+    {/snippet}
+  </Drawer>
 {/if}
 
 <style>

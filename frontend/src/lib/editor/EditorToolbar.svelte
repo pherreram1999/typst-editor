@@ -6,7 +6,7 @@
   //   <EditorToolbar file="cap1.typ" active={…} labels={() => […]} onaction={(id, arg) => …} />
   //
   // Herramientas: undo redo bold italic underline code heading(0–3) bullets
-  // numbered image figure table math link ref(label?) search. Con poco ancho,
+  // numbered image figure table math link cite ref(label?) search. Con poco ancho,
   // las de menor prioridad pasan al menú «Más». Teclado: ←/→ recorren los
   // botones (una sola parada de Tab), Esc cierra tooltips y menús.
   import { onDestroy } from 'svelte'
@@ -33,6 +33,7 @@
     math: '<path d="M18 4H6l6 8-6 8h12"/>',
     link: '<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/>',
     ref: '<circle cx="12" cy="12" r="4"/><path d="M16 8v5a3 3 0 0 0 6 0v-1a10 10 0 1 0-4 8"/>',
+    cite: '<path d="M10 7H6a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h2v1a3 3 0 0 1-3 3"/><path d="M20 7h-4a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h2v1a3 3 0 0 1-3 3"/>',
     search: '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
     chevron: '<path d="m6 9 6 6 6-6"/>',
   }
@@ -60,7 +61,8 @@
       { id: 'table', label: 'Tabla', syntax: '#table(columns: 3, …)', fold: 1 },
       { id: 'math', label: 'Ecuación', keys: 'Ctrl+M', syntax: '$ x $', fold: 1 },
       { id: 'link', label: 'Enlace', keys: 'Ctrl+K', syntax: '#link("…")[…]', fold: 1 },
-      { id: 'ref', label: 'Referencia o cita', syntax: '@etiqueta', menu: true, fold: 1 },
+      { id: 'cite', label: 'Insertar cita de la bibliografía', keys: 'Ctrl+Alt+C', syntax: '@clave', fold: 2 },
+      { id: 'ref', label: 'Referencia a una etiqueta', syntax: '@etiqueta', menu: true, fold: 1 },
     ],
   ]
   const SEARCH = { id: 'search', label: 'Buscar y reemplazar', keys: 'Ctrl+F' }
@@ -235,6 +237,9 @@
       <p class="px-2 py-1.5 text-xs text-slate-500">No hay etiquetas <code>&lt;…&gt;</code> en este archivo.</p>
     {/each}
     <div class="my-1 h-px bg-slate-200"></div>
+    <button type="button" role="menuitem" class="flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-left text-[13px] text-slate-800 hover:bg-slate-100" onclick={() => act('cite')}>
+      Citar de la bibliografía (.bib)…
+    </button>
     <button type="button" role="menuitem" class="flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-left text-[13px] text-slate-800 hover:bg-slate-100" onclick={() => act('ref')}>
       Escribir otra referencia o cita…
     </button>

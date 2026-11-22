@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -93,6 +94,19 @@ func serve() {
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		log.Fatalf("DATA_DIR: %v", err)
 	}
+	// Fuentes adicionales: typst lee TYPST_FONT_PATHS, y todos los procesos
+	// typst (compilación, vista previa, sincronización, catálogo del
+	// navegador) heredan el entorno del servidor.
+	if err := os.MkdirAll(cfg.LocalFontsDir, 0o755); err != nil {
+		log.Printf("aviso: carpeta de fuentes: %v", err)
+	}
+	fontPaths := cfg.FontDirs
+	if prev := os.Getenv("TYPST_FONT_PATHS"); prev != "" {
+		fontPaths = append(append([]string{}, fontPaths...), prev)
+	}
+	os.Setenv("TYPST_FONT_PATHS", strings.Join(fontPaths, string(os.PathListSeparator)))
+	log.Printf("Fuentes adicionales: %s", strings.Join(cfg.FontDirs, ", "))
+
 	for _, bin := range []string{cfg.TypstBin, cfg.GitBin} {
 		if _, err := exec.LookPath(bin); err != nil {
 			log.Printf("aviso: no se encuentra %q en el sistema: %v", bin, err)
@@ -100,7 +114,7 @@ func serve() {
 	}
 	api := httpapi.New(db, auth.NewIssuer(cfg.JWTSecret, cfg.TokenTTL), httpapi.Options{
 		DataDir: cfg.DataDir, TypstBin: cfg.TypstBin, GitBin: cfg.GitBin, GitHubAPI: cfg.GitHubAPI,
-		StaticDir: cfg.StaticDir,
+		StaticDir: cfg.StaticDir, FontDirs: cfg.FontDirs,
 	})
 
 	srv := &http.Server{

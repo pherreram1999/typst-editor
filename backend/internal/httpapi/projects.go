@@ -821,6 +821,11 @@ type compileCache struct {
 }
 
 func (s *Server) cacheFor(id int64) *compileCache {
+	// Una fuente añadida o quitada cambia el resultado sin cambiar la revisión
+	// del proyecto: se descartan las compilaciones guardadas.
+	if sig := s.typst.FontsSignature(); s.fontSig.Swap(sig) != sig {
+		s.cache.Clear()
+	}
 	c, _ := s.cache.LoadOrStore(id, &compileCache{})
 	return c.(*compileCache)
 }

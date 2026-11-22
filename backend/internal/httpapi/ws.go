@@ -18,6 +18,8 @@ import (
 
 var peerColors = []string{"#1E40AF", "#B91C1C", "#047857", "#7C3AED", "#C2410C", "#0E7490", "#BE185D", "#4D7C0F"}
 
+var pongMsg = []byte(`{"type":"pong"}`)
+
 type wsIn struct {
 	Type    string          `json:"type"`
 	Version int             `json:"version"`
@@ -110,6 +112,12 @@ func (s *Server) projectWS(w http.ResponseWriter, r *http.Request) {
 			}
 		case "cursor":
 			s.hub.Cursor(peer, m.Version, m.Anchor, m.Head)
+		case "ping":
+			// Latido del cliente: le permite detectar conexiones muertas.
+			select {
+			case peer.Send <- pongMsg:
+			default:
+			}
 		}
 	}
 }

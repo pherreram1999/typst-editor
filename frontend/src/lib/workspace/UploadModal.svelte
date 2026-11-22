@@ -59,7 +59,7 @@
 
   const uppy = new Uppy({ locale: es_MX, restrictions: { maxFileSize: MAX } })
     .use(XHRUpload, {
-      endpoint: `/api/projects/${projectId}/upload`,
+      endpoint: '', // se fija abajo, reactivo a projectId
       fieldName: 'file',
       formData: true,
       limit: 2,
@@ -85,6 +85,7 @@
     })
   }
   $effect(syncMeta)
+  $effect(() => uppy.getPlugin('XHRUpload').setOptions({ endpoint: `/api/projects/${projectId}/upload` }))
 
   uppy.on('upload', () => (uploading = true))
   for (const ev of ['file-added', 'file-removed', 'cancel-all']) uppy.on(ev, refreshMedia)

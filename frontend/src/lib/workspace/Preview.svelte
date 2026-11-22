@@ -1,7 +1,13 @@
 <script>
-  // Vista previa en vivo. El backend compila a una SVG por página (con las
-  // imágenes reducidas) y /preview solo devuelve, por página, su hash y su
-  // tamaño. Aquí se reserva el hueco de cada página y solo se descargan y
+  // Vista previa en vivo. Normalmente compila en el navegador
+  // (lib/preview/typst.worker.js: typst en WebAssembly, incremental): cada
+  // cambio del editor (livePath/liveVersion/liveText) se compila al momento
+  // y los cambios de otros archivos (remoteKey) se descargan antes. Si el
+  // navegador no puede (sin Worker/WASM, otra versión de typst en el
+  // servidor, falta de memoria…) compila el backend: una SVG por página (con
+  // las imágenes reducidas) y /preview solo devuelve, por página, su hash y su
+  // tamaño. Mientras el compilador del navegador se prepara (la primera vez
+  // descarga unos 15 MB) se muestra la compilación del servidor. Aquí se reserva el hueco de cada página y solo se descargan y
   // montan las que están cerca de la zona visible; al recompilar, las páginas
   // cuyo hash no cambió se conservan tal cual (ni se descargan ni parpadean).
   // Así un documento de cientos de páginas no se carga entero en memoria.
@@ -19,8 +25,9 @@
   import { onDestroy, untrack, flushSync } from 'svelte'
   import { SvelteMap, SvelteSet } from 'svelte/reactivity'
   import { api } from '../api.js'
+  import { BrowserCompiler } from '../preview/engine.js'
 
-  let { projectId, refreshKey, active = true, onresult, onjump } = $props()
+  let { projectId, refreshKey, remoteKey = 0, livePath = '', liveVersion = 0, liveText = () => null, active = true, onresult, onjump } = $props()
 
   const FETCH_MARGIN = '150% 0px' // se descargan páginas hasta 1,5 pantallas más allá
   const MOUNT_MARGIN = '50% 0px' // y se muestran hasta media pantalla más allá
@@ -46,11 +53,27 @@
 
   let lastRev = -1
   let doneKey = -1 // refreshKey de la última compilación terminada
-  let lastMs = 0
+  let lastMs = $state(0)
   let timer
   let destroyed = false
 
-  let sync = null // { rev, points: [{page, y, file, line, col}] }
+  // Compilador del navegador ('local') o del servidor ('server').
+  let mode = $state(typeof Worker !== 'undefined' && typeof WebAssembly !== 'undefined' ? 'local' : 'server')
+  let engine = null
+  let engineReady = null
+  let preparing = $state(false) // el compilador del navegador aún no ha compilado
+  let localDoc = 0 // compilación (del worker) de las páginas mostradas
+  let mainFile = ''
+  let filesDirty = true // hay que pedir la lista de archivos al servidor
+  let sentPath = '' // archivo cuyo texto en vivo tiene el worker
+  let sentVersion = -1
+  let localTimer
+  let localBusy = false
+  let localPending = false
+  const sigs = [] // índice -> { sig, hash } del último SVG de cada página (modo local)
+
+  let sync = null // { gen, points: [{page, y, file, line, col}] }
+  let syncGen = 0 // aumenta con cada compilación: el mapa queda anticuado
   let syncLoading = null
   let syncUsed = false
   let syncTimer
@@ -71,8 +94,14 @@
     timer = setTimeout(compile, doneKey === -1 ? 0 : Math.min(2000, Math.max(450, lastMs / 2)))
   }
 
-  async function compile() {
+  let serverRun = null // compilación del servidor en curso (promesa)
+
+  function compile() {
     if (compiling) return // al terminar se comprueba si hay cambios nuevos
+    serverRun = compileServer().finally(() => (serverRun = null))
+  }
+
+  async function compileServer() {
     compiling = true
     clearTimeout(syncTimer)
     error = ''
@@ -81,12 +110,15 @@
     try {
       const r = await api.preview(projectId)
       if (destroyed) return
+      // El compilador del navegador ya va por delante.
+      if (mode === 'local' && localDoc) return
       if (r.rev !== lastRev || !r.ok) {
         lastRev = r.rev
         result = r
         onresult?.(r)
         if (r.ok) {
           setPages(r.pages)
+          syncGen++
           // Renovar el mapa de sincronización cuando se deje de escribir.
           if (syncUsed) syncTimer = setTimeout(() => ensureSync().catch(() => {}), 2500)
         }
@@ -97,16 +129,124 @@
       lastMs = performance.now() - t0
       compiling = false
       doneKey = key
-      if (!destroyed && active && refreshKey !== key) schedule()
+      if (!destroyed && active && mode === 'server' && refreshKey !== key) schedule()
     }
   }
 
   $effect(() => {
     const key = refreshKey
     if (!active || key === doneKey) return
+    // En modo local solo se compila en el servidor hasta tener la primera
+    // compilación del navegador.
+    if (mode === 'local' && (localDoc || doneKey !== -1)) return
     untrack(schedule)
   })
 
+  // ---------- compilación en el navegador ----------
+
+  function startEngine() {
+    engine = new BrowserCompiler(projectId)
+    preparing = true
+    engineReady = engine.init()
+    engineReady.catch(fallback)
+  }
+
+  // El navegador no puede compilar: se sigue con el servidor.
+  function fallback(err) {
+    if (mode !== 'local' || destroyed) return
+    console.warn('Vista previa: se compila en el servidor.', err)
+    engine?.destroy()
+    engine = null
+    mode = 'server'
+    preparing = false
+    localDoc = 0
+    doneKey = -1
+    if (active) schedule()
+  }
+
+  function scheduleLocal(delay) {
+    clearTimeout(localTimer)
+    localTimer = setTimeout(runLocal, delay)
+  }
+
+  async function runLocal() {
+    if (mode !== 'local' || destroyed || !active) return
+    if (localBusy) {
+      localPending = true
+      return
+    }
+    localBusy = true
+    localPending = false
+    const t0 = performance.now()
+    try {
+      await engineReady
+      // El archivo que se deja de editar vuelve a la versión del servidor.
+      if (sentPath && sentPath !== livePath) {
+        engine.release(sentPath)
+        sentPath = ''
+        filesDirty = true
+      }
+      if (filesDirty) {
+        filesDirty = false
+        try {
+          mainFile = (await engine.syncFiles()).main
+        } catch (e) {
+          filesDirty = true
+          throw e
+        }
+      }
+      const text = livePath ? liveText() : null
+      if (text !== null && (livePath !== sentPath || liveVersion !== sentVersion)) {
+        engine.source(livePath, text)
+        sentPath = livePath
+        sentVersion = liveVersion
+      }
+      // Las dos primeras compilaciones (servidor y navegador) no coinciden:
+      // cada una puede ocupar más de 1 GB con un documento grande.
+      if (serverRun) await serverRun
+      compiling = true
+      const r = await engine.compile(mainFile)
+      if (destroyed) return
+      error = ''
+      preparing = false
+      const res = { ok: r.ok, diagnostics: r.diagnostics, output: r.output, browser: true }
+      result = res
+      onresult?.(res)
+      if (r.ok) {
+        localDoc = r.doc
+        setPages(r.pages.map((p, i) => ({ hash: `${r.doc}:${i}`, width: p.width, height: p.height })))
+        syncGen++
+        if (syncUsed) syncTimer = setTimeout(() => ensureSync().catch(() => {}), 2500)
+      }
+    } catch (e) {
+      if (engine?.broken || preparing) fallback(e)
+      else error = e.message
+    } finally {
+      lastMs = performance.now() - t0
+      localBusy = false
+      compiling = false
+      if (localPending && !destroyed) scheduleLocal(0)
+    }
+  }
+
+  // Cambios en el editor: se compilan enseguida (el worker ya es
+  // incremental). Los de otros archivos se agrupan un momento.
+  $effect(() => {
+    livePath
+    liveVersion
+    if (mode !== 'local' || !active) return
+    untrack(() => {
+      if (!engine) startEngine()
+      scheduleLocal(localDoc ? 15 : 0)
+    })
+  })
+  $effect(() => {
+    remoteKey
+    untrack(() => {
+      filesDirty = true
+      if (mode === 'local' && active && engine) scheduleLocal(250)
+    })
+  })
   function setPages(next) {
     const old = pages
     const carry = []
@@ -125,12 +265,13 @@
   // ---------- sincronización con el código ----------
 
   async function ensureSync() {
-    if (sync && sync.rev >= lastRev) return sync
+    if (sync && sync.gen === syncGen) return sync
     if (!syncLoading) {
       syncBusy = true
+      const gen = syncGen
       syncLoading = api
         .previewSync(projectId)
-        .then((r) => (sync = r))
+        .then((r) => (sync = { gen, points: r.points }))
         .finally(() => {
           syncLoading = null
           syncBusy = false
@@ -314,6 +455,7 @@
   })
 
   function pump() {
+    if (mode === 'local' && localDoc) return pumpLocal()
     while (inflight < PARALLEL && queue.length) {
       const hash = queue.shift()
       if (urls.has(hash) || loading.has(hash)) continue
@@ -323,13 +465,7 @@
         .previewPage(projectId, hash)
         .then(({ blob }) => {
           if (destroyed) return
-          urls.set(hash, URL.createObjectURL(blob))
-          if (stale.length) {
-            pages.forEach((p, i) => {
-              if (p.hash === hash && stale[i]) stale[i] = undefined
-            })
-          }
-          evict()
+          gotPage(hash, URL.createObjectURL(blob))
         })
         .catch((e) => {
           // La página ya no existe en el servidor (hubo otra compilación):
@@ -345,6 +481,65 @@
           if (!destroyed) pump()
         })
     }
+  }
+
+  function gotPage(hash, url) {
+    urls.set(hash, url)
+    if (stale.length) {
+      pages.forEach((p, i) => {
+        if (p.hash === hash && stale[i]) stale[i] = undefined
+      })
+    }
+    evict()
+  }
+
+  // Firma rápida del SVG de una página: si no cambió respecto a la
+  // compilación anterior se reutiliza su blob URL (no se vuelve a decodificar).
+  function signature(str) {
+    let h = 0x811c9dc5
+    for (let i = 0; i < str.length; i += 7) h = Math.imul(h ^ str.charCodeAt(i), 0x01000193)
+    return `${str.length}:${h >>> 0}`
+  }
+
+  // Modo local: el worker dibuja las páginas pedidas de una vez (en lotes).
+  function pumpLocal() {
+    if (inflight || !queue.length) return
+    const doc = localDoc
+    const batch = []
+    while (queue.length && batch.length < 8) {
+      const hash = queue.shift()
+      const [d, i] = hash.split(':').map(Number)
+      if (d !== doc || urls.has(hash)) continue
+      batch.push(i)
+      loading.add(hash)
+    }
+    if (!batch.length) return
+    inflight++
+    engine
+      .render(doc, batch)
+      .then((r) => {
+        if (destroyed || r.stale) return
+        for (const { index, svg } of r.pages) {
+          const hash = `${doc}:${index}`
+          const sig = signature(svg)
+          const prev = sigs[index]
+          let url
+          if (prev && prev.sig === sig && urls.has(prev.hash) && pages[index]?.hash === hash) {
+            url = urls.get(prev.hash)
+            urls.delete(prev.hash)
+          } else url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }))
+          sigs[index] = { sig, hash }
+          gotPage(hash, url)
+        }
+      })
+      .catch((e) => {
+        if (engine?.broken) fallback(e)
+      })
+      .finally(() => {
+        inflight--
+        for (const i of batch) loading.delete(`${doc}:${i}`)
+        if (!destroyed) pump()
+      })
   }
 
   // Libera las páginas descargadas más antiguas que no están cerca de la vista.
@@ -429,6 +624,8 @@
 
   onDestroy(() => {
     destroyed = true
+    engine?.destroy()
+    clearTimeout(localTimer)
     clearTimeout(timer)
     clearTimeout(syncTimer)
     clearTimeout(markerTimer)
@@ -440,14 +637,19 @@
 <div class="flex h-full min-h-0 flex-col">
   <div class="flex h-10 shrink-0 items-center justify-between gap-2 border-b border-slate-200 bg-surface px-3 text-[13px]">
     <div class="flex items-center gap-2 text-slate-600">
-      {#if compiling}
+      {#if preparing && !pages.length}
+        <span class="size-2 animate-pulse rounded-full bg-amber-500"></span> Preparando el compilador…
+      {:else if compiling && (mode === 'server' || !result || lastMs > 300)}
         <span class="size-2 animate-pulse rounded-full bg-amber-500"></span> Compilando…
       {:else if syncBusy}
         <span class="size-2 animate-pulse rounded-full bg-sky-500"></span> Sincronizando…
       {:else if result && !result.ok}
         <span class="size-2 rounded-full bg-red-600"></span> Error de compilación
       {:else if result}
-        <span class="size-2 rounded-full bg-emerald-600"></span>
+        <span
+          class="size-2 rounded-full bg-emerald-600"
+          title={result.browser ? 'Compilado en el navegador' : 'Compilado en el servidor'}
+        ></span>
         {#if current && pages.length > 1}
           <span class="tabular-nums">Página {current} de {pages.length}</span>
         {:else}
@@ -466,6 +668,10 @@
     <div class="alert-error m-3">{error}</div>
   {/if}
 
+  <!-- Visor con zoom (+/−/0) y arrastre: necesita el foco y los eventos de
+       teclado y puntero; «region» describe mejor su contenido que un rol de
+       widget, así que se silencian los avisos a propósito. -->
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
   <div
     bind:this={scroller}
     class="min-h-0 flex-1 overflow-auto bg-slate-200/70 p-4 outline-none select-none {dragging ? 'cursor-grabbing' : 'cursor-grab'}"

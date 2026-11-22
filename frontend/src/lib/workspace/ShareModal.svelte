@@ -121,6 +121,52 @@
     }
   }
 
+  // ---------- exportar ----------
+  let exporting = $state('') // '' | 'pdf' | 'zip'
+
+  // Descarga un archivo con el gestor de descargas del navegador.
+  function download(href, filename) {
+    const a = document.createElement('a')
+    a.href = href
+    if (filename) a.download = filename
+    document.body.append(a)
+    a.click()
+    a.remove()
+  }
+
+  async function exportPdf() {
+    error = ''
+    notice = ''
+    exporting = 'pdf'
+    try {
+      const { blob } = await api.pdf(project.id)
+      const href = URL.createObjectURL(blob)
+      download(href, `${project.name.replace(/[\\/:*?"<>|]+/g, '-').trim() || 'documento'}.pdf`)
+      setTimeout(() => URL.revokeObjectURL(href), 60000)
+    } catch (e) {
+      error = e.data?.diagnostics
+        ? 'El documento tiene errores y no se pudo generar el PDF. Revísalos en el panel «Problemas».'
+        : e.message
+    } finally {
+      exporting = ''
+    }
+  }
+
+  async function exportZip() {
+    error = ''
+    notice = ''
+    exporting = 'zip'
+    try {
+      // El servidor arma el .zip mientras lo envía: la descarga sigue en el navegador.
+      download(await api.exportZipURL(project.id))
+      notice = 'La descarga del proyecto comenzó en el navegador.'
+    } catch (e) {
+      error = e.message
+    } finally {
+      exporting = ''
+    }
+  }
+
   const initials = (n) => n.split(/\s+/).map((w) => w[0]).slice(0, 2).join('').toUpperCase()
   const suggestions = $derived(results.filter((u) => !memberIds.has(u.id)))
 </script>
@@ -207,6 +253,42 @@
           {/each}
         </ul>
       {/if}
+    </div>
+
+    <div class="border-t border-slate-200 pt-4">
+      <p class="mb-2 text-[13px] font-semibold text-slate-800">Exportar</p>
+      <div class="grid gap-2 sm:grid-cols-2">
+        <button
+          type="button"
+          class="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-200 p-3 text-left hover:border-primary hover:bg-primary-tint disabled:cursor-wait disabled:opacity-60"
+          onclick={exportPdf}
+          disabled={!!exporting}
+        >
+          <svg class="mt-0.5 shrink-0 text-red-600" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" /><path d="M14 3v5h5" /><path d="M12 12v6m-3-3 3 3 3-3" />
+          </svg>
+          <span class="text-sm">
+            <span class="block font-medium text-slate-900">{exporting === 'pdf' ? 'Compilando PDF…' : 'Descargar PDF'}</span>
+            <span class="block text-xs text-slate-500">El documento compilado, con las imágenes originales.</span>
+          </span>
+        </button>
+        <button
+          type="button"
+          class="flex cursor-pointer items-start gap-3 rounded-lg border border-slate-200 p-3 text-left hover:border-primary hover:bg-primary-tint disabled:cursor-wait disabled:opacity-60"
+          onclick={exportZip}
+          disabled={!!exporting}
+        >
+          <svg class="mt-0.5 shrink-0 text-amber-600" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+            stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M21 8v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8" /><path d="M1 3h22v5H1z" /><path d="M10 12h4" />
+          </svg>
+          <span class="text-sm">
+            <span class="block font-medium text-slate-900">{exporting === 'zip' ? 'Preparando…' : 'Descargar proyecto (.zip)'}</span>
+            <span class="block text-xs text-slate-500">Todos los archivos fuente e imágenes, sin el historial de git.</span>
+          </span>
+        </button>
+      </div>
     </div>
   </div>
 </Modal>
