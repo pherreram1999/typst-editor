@@ -16,7 +16,9 @@ import (
 	"encoding/json"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf16"
@@ -86,7 +88,7 @@ func (c *Compiler) SyncMap(ctx context.Context, root, main, outDir string) ([]Sy
 		text, _ := r[2].(string)
 		blocks = append(blocks, block{int(page), y, text})
 	}
-	srcs, err := loadSources(root)
+	srcs, err := loadSources(root, main)
 	if err != nil {
 		return nil, err
 	}
@@ -103,9 +105,13 @@ type source struct {
 	tokens []token
 }
 
-// loadSources lee los .typ del proyecto (sin .git).
-func loadSources(root string) ([]source, error) {
-	var srcs []source
+// loadSources lee los .typ del proyecto (sin .git) en el orden en que el
+// documento los recorre: main y, en profundidad, cada #include en el orden en
+// que aparece. Los archivos que no se alcanzan así (plantillas importadas,
+// includes calculados) van al final. matchBlocks depende de este orden.
+func loadSources(root, main string) ([]source, error) {
+	texts := map[string]string{}
+	var all []string
 	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -121,10 +127,74 @@ func loadSources(root string) ([]source, error) {
 			return err
 		}
 		rel, _ := filepath.Rel(root, p)
-		srcs = append(srcs, source{filepath.ToSlash(rel), tokenizeSource(string(b))})
+		rel = filepath.ToSlash(rel)
+		texts[rel] = string(b)
+		all = append(all, rel)
 		return nil
 	})
-	return srcs, err
+	if err != nil {
+		return nil, err
+	}
+	var order []string
+	seen := map[string]bool{}
+	var visit func(string)
+	visit = func(f string) {
+		if seen[f] {
+			return
+		}
+		if _, ok := texts[f]; !ok {
+			return
+		}
+		seen[f] = true
+		order = append(order, f)
+		for _, inc := range includes(texts[f]) {
+			if strings.HasPrefix(inc, "/") {
+				inc = path.Clean(strings.TrimPrefix(inc, "/"))
+			} else {
+				inc = path.Join(path.Dir(f), inc)
+			}
+			visit(inc)
+		}
+	}
+	visit(path.Clean(filepath.ToSlash(main)))
+	for _, f := range all {
+		if !seen[f] {
+			order = append(order, f)
+		}
+	}
+	srcs := make([]source, len(order))
+	for i, f := range order {
+		srcs[i] = source{f, tokenizeSource(texts[f])}
+	}
+	return srcs, nil
+}
+
+var includeRe = regexp.MustCompile(`(?:^|[^\w-])include\s*\(?\s*"([^"]+)"`)
+
+// includes devuelve, en orden, las rutas de los include con cadena literal de
+// un .typ, ignorando los comentarios de línea.
+func includes(src string) []string {
+	var out []string
+	for _, line := range strings.Split(src, "\n") {
+		if i := lineComment(line); i >= 0 {
+			line = line[:i]
+		}
+		for _, m := range includeRe.FindAllStringSubmatch(line, -1) {
+			out = append(out, m[1])
+		}
+	}
+	return out
+}
+
+// lineComment devuelve el índice de «//» que abre un comentario (al inicio o
+// tras un espacio, para no confundirlo con URL), o -1.
+func lineComment(line string) int {
+	for i := 0; i+1 < len(line); i++ {
+		if line[i] == '/' && line[i+1] == '/' && (i == 0 || line[i-1] == ' ' || line[i-1] == '\t') {
+			return i
+		}
+	}
+	return -1
 }
 
 func isWordRune(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }
@@ -171,10 +241,16 @@ func tokenizeSource(src string) []token {
 
 type srcPos struct{ file, tok int }
 
+// before indica si a va antes que b en el orden del documento.
+func (a srcPos) before(b srcPos) bool {
+	return a.file < b.file || a.file == b.file && a.tok < b.tok
+}
+
 // matchBlocks localiza cada bloque en las fuentes buscando sus primeras
 // palabras (de tres en tres; menos si el bloque es corto). Si una secuencia
-// aparece varias veces se prefiere la que sigue al bloque anterior en el
-// mismo archivo, porque el documento suele recorrer las fuentes en orden.
+// aparece varias veces gana la aparición que coincide con más palabras
+// seguidas del bloque y, a igualdad, la siguiente al bloque anterior en el
+// orden del documento (srcs viene ordenado como lo recorre main).
 func matchBlocks(blocks []block, srcs []source) []SyncPoint {
 	index := [4]map[string][]srcPos{nil, {}, {}, {}}
 	for fi, s := range srcs {
@@ -185,8 +261,7 @@ func matchBlocks(blocks []block, srcs []source) []SyncPoint {
 			}
 		}
 	}
-	last := make([]int, len(srcs))
-	prevFile := -1
+	var cur srcPos
 	var points []SyncPoint
 	for _, b := range blocks {
 		ws := words(b.text)
@@ -194,20 +269,17 @@ func matchBlocks(blocks []block, srcs []source) []SyncPoint {
 			continue
 		}
 		n := min(3, len(ws))
-		var found *srcPos
-		for i := 0; i+n <= len(ws) && i < 8 && found == nil; i++ {
-			cands := index[n][strings.Join(ws[i:i+n], " ")]
-			if len(cands) > 0 {
-				p := pick(cands, last, prevFile)
-				found = &p
+		found := false
+		for i := 0; i+n <= len(ws) && i < 8 && !found; i++ {
+			if cands := index[n][strings.Join(ws[i:i+n], " ")]; len(cands) > 0 {
+				cur, found = pick(cands, ws[i:], srcs, cur), true
 			}
 		}
-		if found == nil {
+		if !found {
 			continue
 		}
-		last[found.file], prevFile = found.tok, found.file
-		t := srcs[found.file].tokens[found.tok]
-		pt := SyncPoint{Page: b.page, Y: b.y, File: srcs[found.file].path, Line: t.line, Col: t.col}
+		t := srcs[cur.file].tokens[cur.tok]
+		pt := SyncPoint{Page: b.page, Y: b.y, File: srcs[cur.file].path, Line: t.line, Col: t.col}
 		if len(points) > 0 && points[len(points)-1] == pt {
 			continue
 		}
@@ -224,24 +296,36 @@ func joinTokens(ts []token) string {
 	return strings.Join(w, " ")
 }
 
-// pick elige entre varias apariciones: primero la siguiente en el archivo
-// del bloque anterior, después la siguiente en cualquier archivo y, si no
-// hay, la primera.
-func pick(cands []srcPos, last []int, prevFile int) srcPos {
-	var other *srcPos
+// maxRun limita cuántas palabras seguidas se comparan al desempatar.
+const maxRun = 24
+
+// pick elige entre varias apariciones (en orden del documento) la que
+// coincide con más palabras seguidas de ws; a igualdad, la primera que no
+// queda antes de cur y, si todas quedan antes, la más cercana a cur.
+func pick(cands []srcPos, ws []string, srcs []source, cur srcPos) srcPos {
+	ws = ws[:min(len(ws), maxRun)]
+	bestRun := -1
+	var ahead, behind *srcPos
 	for i, c := range cands {
-		if c.tok < last[c.file] {
+		toks := srcs[c.file].tokens[c.tok:]
+		run := 0
+		for run < len(ws) && run < len(toks) && toks[run].word == ws[run] {
+			run++
+		}
+		if run > bestRun {
+			bestRun, ahead, behind = run, nil, nil
+		}
+		if run < bestRun {
 			continue
 		}
-		if c.file == prevFile {
-			return c
-		}
-		if other == nil {
-			other = &cands[i]
+		if c.before(cur) {
+			behind = &cands[i]
+		} else if ahead == nil {
+			ahead = &cands[i]
 		}
 	}
-	if other != nil {
-		return *other
+	if ahead != nil {
+		return *ahead
 	}
-	return cands[0]
+	return *behind
 }

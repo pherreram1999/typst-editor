@@ -3,6 +3,7 @@ package typst
 import (
 	"context"
 	"os/exec"
+	"strings"
 	"testing"
 )
 
@@ -41,6 +42,49 @@ func TestMatchBlocksPrefersDocumentOrder(t *testing.T) {
 	}
 	if len(lines) != 4 || lines[0] != 1 || lines[1] != 2 || lines[2] != 4 || lines[3] != 6 {
 		t.Errorf("líneas %v, quiero [1 2 4 6]", lines)
+	}
+}
+
+func TestLoadSourcesFollowsIncludes(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "main.typ", []byte("#import \"config/p.typ\": *\n// #include \"caps/zz.typ\"\n#include \"caps/intro.typ\"\n#include(\"/caps/a.typ\")\n"))
+	writeFile(t, root, "caps/intro.typ", []byte("#include \"b.typ\"\n"))
+	writeFile(t, root, "caps/a.typ", []byte(""))
+	writeFile(t, root, "caps/b.typ", []byte(""))
+	writeFile(t, root, "caps/zz.typ", []byte(""))
+	writeFile(t, root, "config/p.typ", []byte(""))
+	srcs, err := loadSources(root, "main.typ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, s := range srcs {
+		got = append(got, s.path)
+	}
+	want := "main.typ caps/intro.typ caps/b.typ caps/a.typ caps/zz.typ config/p.typ"
+	if strings.Join(got, " ") != want {
+		t.Errorf("orden %v, quiero %s", got, want)
+	}
+}
+
+// Un título de una palabra que también aparece en un capítulo posterior (por
+// orden alfabético, anterior) debe ir al archivo que sigue en el documento, y
+// a igualdad de inicio gana la aparición que coincide con más palabras.
+func TestMatchBlocksAcrossFiles(t *testing.T) {
+	srcs := []source{
+		{"abrev.typ", tokenizeSource("= Abreviaturas\nIPN: Instituto.")},
+		{"intro.typ", tokenizeSource("= Introducción\nEl Instituto Politécnico Nacional, fundado en 1936.")},
+		{"cap3.typ", tokenizeSource("En el Instituto Politécnico Nacional la educación continua.")},
+		{"cap4.typ", tokenizeSource("mediante la introducción de flujos.")},
+	}
+	blocks := []block{
+		{1, 10, "Abreviaturas"},
+		{2, 10, "Introducción"},
+		{2, 30, "El Instituto Politécnico Nacional, fundado en 1936."},
+	}
+	got := matchBlocks(blocks, srcs)
+	if len(got) != 3 || got[1].File != "intro.typ" || got[1].Line != 1 || got[2].File != "intro.typ" || got[2].Line != 2 {
+		t.Errorf("puntos %+v", got)
 	}
 }
 
