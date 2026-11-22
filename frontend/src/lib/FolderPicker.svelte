@@ -11,8 +11,11 @@
   // - value (bindable): carpeta elegida; '' es la raíz.
   // - Las carpetas nuevas solo existen aquí hasta que se guarda algo en ellas
   //   (oncreate avisa por si el padre quiere recordarlas).
+  // - pick="file" con `files` (rutas de archivos): el árbol muestra también esos
+  //   archivos y value es el archivo elegido (las carpetas solo se despliegan);
+  //   doble clic o Enter sobre un archivo llama a onpick(ruta).
   // Teclado en el árbol: ↑/↓ moverse, → desplegar/entrar, ← plegar/subir,
-  // Inicio/Fin, F2 o Insert para nueva carpeta.
+  // Inicio/Fin, F2 o Insert para nueva carpeta, Enter para confirmar un archivo.
   import { tick, untrack } from 'svelte'
 
   let {
@@ -22,13 +25,26 @@
     allowCreate = true,
     disabled = false,
     height = '16rem',
+    files = [],
+    pick = 'folder',
     oncreate,
+    onpick,
   } = $props()
+  const fileMode = untrack(() => pick === 'file')
 
   let created = $state([]) // carpetas nuevas aún vacías
   // Con pocas carpetas el árbol empieza desplegado; si no, solo el primer
   // nivel (y la ruta de la carpeta elegida, ver más abajo).
-  let expanded = $state(new Set(['', ...untrack(() => (folders.length <= 25 ? folders : []))]))
+  let expanded = $state(
+    new Set([
+      '',
+      ...untrack(() => {
+        const dirs = [...folders, ...files.map((f) => (f.includes('/') ? f.slice(0, f.lastIndexOf('/')) : ''))].filter(Boolean)
+        const anc = new Set(dirs.flatMap((d) => d.split('/').map((_, i, a) => a.slice(0, i + 1).join('/'))))
+        return anc.size <= 25 ? [...anc] : []
+      }),
+    ]),
+  )
   let creating = $state(null) // { parent, name, error }
   let tree = $state()
   const uid = Math.random().toString(36).slice(2, 8)
@@ -48,7 +64,7 @@
   // Todas las carpetas, con sus ancestros.
   const all = $derived.by(() => {
     const set = new Set()
-    for (const f of [...folders, ...created]) {
+    for (const f of [...folders, ...created, ...(fileMode ? files.map(parentOf) : [])]) {
       const parts = clean(f).split('/').filter(Boolean)
       for (let i = 1; i <= parts.length; i++) set.add(parts.slice(0, i).join('/'))
     }
@@ -64,14 +80,28 @@
     for (const list of m.values()) list.sort((a, b) => collator.compare(nameOf(a), nameOf(b)))
     return m
   })
-  const hasChildren = (p) => (childrenOf.get(p)?.length ?? 0) > 0
+  // Modo archivo: archivos de cada carpeta, detrás de las subcarpetas.
+  const fileSet = $derived(new Set(fileMode ? files : []))
+  const filesOf = $derived.by(() => {
+    const m = new Map()
+    for (const f of fileSet) {
+      const d = parentOf(f)
+      if (!m.has(d)) m.set(d, [])
+      m.get(d).push(f)
+    }
+    for (const list of m.values()) list.sort((a, b) => collator.compare(nameOf(a), nameOf(b)))
+    return m
+  })
+  const kidsOf = (p) => [...(childrenOf.get(p) ?? []), ...(filesOf.get(p) ?? [])]
+  const isFile = (p) => fileSet.has(p)
+  const hasChildren = (p) => kidsOf(p).length > 0
 
   // Filas visibles en orden (para el teclado).
   const visible = $derived.by(() => {
     const out = ['']
     const walk = (p) => {
       if (!expanded.has(p)) return
-      for (const c of childrenOf.get(p) ?? []) {
+      for (const c of kidsOf(p)) {
         out.push(c)
         walk(c)
       }
@@ -104,7 +134,8 @@
 
   function select(p) {
     if (disabled) return
-    value = p
+    if (fileMode && !isFile(p)) toggle(p)
+    else value = p
   }
   function toggle(p, open = !expanded.has(p)) {
     const next = new Set(expanded)
@@ -189,12 +220,21 @@
       case 'ArrowRight':
         e.preventDefault()
         if (hasChildren(value) && !expanded.has(value)) toggle(value, true)
-        else if (hasChildren(value)) value = childrenOf.get(value)[0]
+        else if (hasChildren(value)) value = kidsOf(value)[0]
         return
       case 'ArrowLeft':
         e.preventDefault()
         if (value !== '' && expanded.has(value) && hasChildren(value)) toggle(value, false)
         else if (value !== '') value = parentOf(value)
+        return
+      case 'Enter':
+        if (fileMode && isFile(value)) {
+          e.preventDefault()
+          onpick?.(value)
+        } else if (fileMode) {
+          e.preventDefault()
+          toggle(value)
+        }
         return
       case 'F2':
       case 'Insert':
@@ -217,15 +257,37 @@
   </svg>
 {/snippet}
 
+{#snippet fileRow(path, depth)}
+  <li role="treeitem" aria-selected={value === path}>
+    <div
+      data-path={path}
+      class="flex h-7 cursor-pointer items-center gap-1.5 rounded-md pr-2 text-[13px] select-none {value === path
+        ? 'bg-primary text-white'
+        : 'text-slate-700 hover:bg-slate-200/70'}"
+      style="padding-left: {depth * 16 + 24}px"
+      onclick={() => select(path)}
+      ondblclick={() => onpick?.(path)}
+      role="presentation"
+    >
+      <svg class="size-4 shrink-0 {value === path ? 'text-white' : 'text-emerald-600'}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" /><circle cx="9" cy="10" r="1.6" /><path d="m21 16-5-5-9 9" /></svg>
+      <span class="truncate">{nameOf(path)}</span>
+    </div>
+  </li>
+{/snippet}
+
 {#snippet row(path, depth)}
+  {#if isFile(path)}{@render fileRow(path, depth)}{:else}{@render folderRow(path, depth)}{/if}
+{/snippet}
+
+{#snippet folderRow(path, depth)}
   {@const isRoot = path === ''}
   {@const open = expanded.has(path)}
-  {@const kids = childrenOf.get(path) ?? []}
+  {@const kids = kidsOf(path)}
   {@const isNew = created.includes(path) && !folders.includes(path)}
   <li role="treeitem" aria-selected={value === path} aria-expanded={kids.length || creating?.parent === path ? open : undefined}>
     <div
       data-path={path}
-      class="flex h-7 cursor-pointer items-center gap-1.5 rounded-md pr-2 text-[13px] select-none {value === path
+      class="flex h-7 cursor-pointer items-center gap-1.5 rounded-md pr-2 text-[13px] select-none {value === path && !fileMode
         ? 'bg-primary text-white'
         : 'text-slate-700 hover:bg-slate-200/70'}"
       style="padding-left: {depth * 16 + 4}px"
@@ -287,13 +349,14 @@
         class="h-8 w-full rounded-md border border-slate-300 bg-surface pr-2 pl-5 font-mono text-[13px] text-slate-900 outline-none focus:border-primary focus:ring-2 focus:ring-primary/20"
         value={pathText}
         oninput={onPathInput}
-        placeholder="(raíz)"
+        placeholder={fileMode ? 'Elige un archivo en el árbol' : '(raíz)'}
         spellcheck="false"
-        aria-label="Ruta de la carpeta"
+        aria-label={fileMode ? 'Archivo elegido' : 'Ruta de la carpeta'}
+        readonly={fileMode}
         {disabled}
       />
     </div>
-    {#if allowCreate}
+    {#if allowCreate && !fileMode}
       <button
         type="button"
         class="flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-md text-slate-500 hover:bg-slate-200 hover:text-slate-900 disabled:opacity-50"
@@ -323,7 +386,7 @@
     class="overflow-auto rounded-lg border border-slate-200 bg-surface p-1 outline-none focus-visible:ring-2 focus-visible:ring-primary/30 {disabled ? 'opacity-60' : ''}"
     style="height: {height}"
     role="tree"
-    aria-label="Carpetas"
+    aria-label={fileMode ? 'Archivos' : 'Carpetas'}
     tabindex="0"
     onkeydown={onTreeKey}
     id="folder-tree-{uid}"
@@ -332,7 +395,9 @@
   </ul>
 
   <p class="text-xs text-slate-500">
-    {#if !exists}
+    {#if fileMode}
+      {#if isFile(value)}Elegido: <code class="font-mono">{value}</code>{:else if !files.length}No hay archivos que elegir.{:else}Elige un archivo (doble clic para confirmar).{/if}
+    {:else if !exists}
       Se creará <code class="font-mono">{value}/</code> al guardar.
     {:else}
       Destino: <code class="font-mono">{value ? `${value}/` : `${rootLabel} (raíz)`}</code>

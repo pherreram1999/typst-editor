@@ -11,7 +11,7 @@
 //  - Si un envío se rechaza, el cliente ya habrá recibido antes los cambios que
 //    le faltaban (el servidor los manda por la misma conexión, en orden), hace
 //    rebase y reintenta.
-import { EditorState, ChangeSet } from '@codemirror/state'
+import { EditorState, ChangeSet, Prec } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
 import { basicSetup } from 'codemirror'
 import { indentWithTab } from '@codemirror/commands'
@@ -20,6 +20,8 @@ import { collab, receiveUpdates, sendableUpdates, getSyncedVersion } from '@code
 import { typstLanguage, typstHighlight } from './typst-lang.js'
 import { remoteCursors, setRemoteCursor, removeRemoteCursor } from './cursors.js'
 import { wsURL } from '../api.js'
+import { formatKeymap } from './commands.js'
+import { imageHover, imageHoverTheme } from './imageHover.js'
 
 const editorTheme = EditorView.theme({
   // Colores de app.css: cambian con el tema.
@@ -52,6 +54,9 @@ export class CollabSession {
    * @param {() => void} [o.onSynced] cambios confirmados o recibidos
    * @param {(msg: string) => void} [o.onWarning]
    * @param {(pos: {line: number, column: number}) => void} [o.onCursorClick] clic que deja el cursor (sin selección)
+   * @param {(state: EditorState) => void} [o.onState] estado tras cada cambio o movimiento del cursor (barra de herramientas)
+   * @param {() => void} [o.onImage] atajo «insertar imagen»
+   * @param {object} [o.imageHandlers] tarjeta sobre image("…"): { resolve, onEdit } (ver imageHover.js)
    * @param {(files: File[], at: {pos: number}) => void} [o.onFilesDrop] archivos soltados en el editor (en vez de
    *   insertar su contenido); `at` es la posición donde se soltaron, que se mantiene al día con las ediciones
    */
@@ -72,6 +77,9 @@ export class CollabSession {
     return [
       basicSetup,
       keymap.of([indentWithTab]),
+      // Atajos de formato por encima de los de basicSetup (p. ej. Mod-i, Mod-u).
+      Prec.high(keymap.of(formatKeymap({ image: () => this.onImage?.() }))),
+      this.imageHandlers ? [imageHover(this.imageHandlers), EditorView.theme(imageHoverTheme)] : [],
       typstLanguage,
       syntaxHighlighting(typstHighlight),
       EditorView.lineWrapping,
@@ -109,6 +117,7 @@ export class CollabSession {
         if (u.docChanged) for (const t of this.tracked) t.pos = u.changes.mapPos(t.pos)
         if (u.docChanged) this.push()
         if (u.docChanged || u.selectionSet) this.scheduleCursor()
+        if (u.docChanged || u.selectionSet) this.notifyState()
       }),
     ]
   }
@@ -159,6 +168,7 @@ export class CollabSession {
         this.onStatus?.('online')
         this.onSynced?.()
         this.scheduleCursor()
+        this.notifyState()
         break
       }
       case 'resume':
@@ -249,6 +259,23 @@ export class CollabSession {
 
   untrack(t) {
     this.tracked.delete(t)
+  }
+
+  // Avisa del estado (una vez por fotograma) para la barra de herramientas.
+  notifyState() {
+    if (!this.onState || this.stateFrame) return
+    this.stateFrame = requestAnimationFrame(() => {
+      this.stateFrame = 0
+      if (this.view) this.onState(this.view.state)
+    })
+  }
+
+  // Reemplaza [from, to) y deja el cursor al final.
+  replaceRange(from, to, text) {
+    if (!this.view) return false
+    this.view.dispatch({ changes: { from, to, insert: text }, selection: { anchor: from + text.length }, scrollIntoView: true })
+    this.view.focus()
+    return true
   }
 
   get cursor() {

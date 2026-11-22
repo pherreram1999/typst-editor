@@ -6,13 +6,17 @@
   import { d } from '../lib/motion.js'
   import Modal from '../lib/Modal.svelte'
   import { CollabSession } from '../lib/editor/collab-client.js'
-  import { relativePath, figureLabel, mediaSnippet } from '../lib/editor/snippets.js'
+  import { relativePath, figureLabel, mediaSnippet, resolvePath, escapeString } from '../lib/editor/snippets.js'
+  import EditorToolbar from '../lib/editor/EditorToolbar.svelte'
+  import * as cmd from '../lib/editor/commands.js'
   import Preview from '../lib/workspace/Preview.svelte'
   import PdfView from '../lib/workspace/PdfView.svelte'
   import ProblemsPanel from '../lib/workspace/ProblemsPanel.svelte'
   import ShareModal from '../lib/workspace/ShareModal.svelte'
   import FileTree from '../lib/workspace/FileTree.svelte'
   import OptimizeModal from '../lib/workspace/OptimizeModal.svelte'
+  import ImageModal from '../lib/workspace/ImageModal.svelte'
+  import { imageURL } from '../lib/workspace/imageCache.js'
   import RepoPicker from '../lib/RepoPicker.svelte'
 
   let { id } = $props()
@@ -82,6 +86,21 @@
       projectId: id,
       path,
       parent: host,
+      onState: (st) => (fmt = cmd.activeFormats(st)),
+      onImage: () => insertImage(),
+      // Tarjeta sobre image("…"): miniatura y acciones para cambiarla.
+      imageHandlers: {
+        resolve: (rel) => {
+          const p = resolvePath(path, rel)
+          const f = files.find((x) => x.path === p)
+          return { path: p, exists: !!f, url: f ? imageURL(id, p, f.size) : null }
+        },
+        onEdit: ({ from, to, rel }, how) => {
+          const target = { mode: 'replace', path, from: s.track(from), to: s.track(to), current: resolvePath(path, rel) }
+          if (how === 'upload') uploadImage(target)
+          else openImageDialog(target)
+        },
+      },
       // Clic en el código: llevar la vista previa a ese punto.
       // Archivos soltados en el código: se pregunta la carpeta.
       onFilesDrop: (list, at) => {
@@ -200,6 +219,65 @@
   // Uppy pesa ~280 KB: se carga aparte, después de abrir el proyecto.
   const uploadModal = import('../lib/workspace/UploadModal.svelte')
   let editorDrag = $state(0) // >0 mientras se arrastran archivos sobre el editor
+  let fmt = $state({}) // formato bajo el cursor (barra de herramientas)
+
+  // ---------- imágenes: insertar (barra, Ctrl+Alt+I) o cambiar (tarjeta sobre image("…")) ----------
+  let imageDialog = $state() // ImageModal
+  let imageTarget = null // { mode: 'insert', path, at } | { mode: 'replace', path, from, to, current }
+
+  function releaseTarget(t) {
+    if (!t || !collab) return
+    for (const k of ['at', 'from', 'to']) if (t[k]) collab.untrack(t[k])
+  }
+  function openImageDialog(target) {
+    releaseTarget(imageTarget)
+    imageTarget = target
+    imageDialog?.openFor(target)
+  }
+  function insertImage() {
+    const s = collab
+    if (!s?.view) return
+    openImageDialog({ mode: 'insert', path: s.path, at: s.track(s.cursor) })
+  }
+  // Pasar a la subida (UploadModal), que al terminar llama a insertMedia.
+  function uploadImage(target) {
+    imageTarget = null // ahora la posición es de la subida (se libera con onrelease)
+    const ctx = target.mode === 'replace' ? { path: target.path, replace: { from: target.from, to: target.to } } : { path: target.path, at: target.at }
+    const folder = target.mode === 'replace' && target.current.includes('/') ? target.current.slice(0, target.current.lastIndexOf('/')) : suggestFolder([{ type: 'image/png' }])
+    if (!uploader) return releaseTarget(target)
+    uploader.openInsertImage({ folder, insert: ctx })
+  }
+  // Imagen elegida del proyecto en el diálogo.
+  function chooseImage({ path: chosen, caption }) {
+    const t = imageTarget
+    imageTarget = null
+    if (!t) return
+    if (t.mode === 'replace') insertMedia({ ctx: { path: t.path, replace: { from: t.from, to: t.to } }, items: [{ path: chosen }] })
+    else insertMedia({ ctx: { path: t.path, at: t.at }, items: [{ path: chosen, caption }] })
+  }
+  function onTool(id, arg) {
+    const s = collab
+    const v = s?.view
+    if (!v) return
+    switch (id) {
+      case 'undo': return cmd.runUndo(v)
+      case 'redo': return cmd.runRedo(v)
+      case 'bold': return cmd.toggleMark(v, '*')
+      case 'italic': return cmd.toggleMark(v, '_')
+      case 'code': return cmd.toggleMark(v, '`')
+      case 'underline': return cmd.toggleFunc(v, 'underline')
+      case 'heading': return cmd.setHeading(v, arg ?? 1)
+      case 'bullets':
+      case 'numbered': return cmd.toggleList(v, id)
+      case 'image': return insertImage()
+      case 'figure': return s.insertBlock(s.cursor, cmd.FIGURE.text.replace('fig-nueva', figureLabel('nueva', s.text)), cmd.FIGURE.select)
+      case 'table': return s.insertBlock(s.cursor, cmd.TABLE.text, cmd.TABLE.select)
+      case 'math': return cmd.insertMath(v)
+      case 'link': return cmd.insertLink(v)
+      case 'ref': return cmd.insertRef(v, arg)
+      case 'search': return cmd.runSearch(v)
+    }
+  }
 
   // Carpeta propuesta para archivos soltados en el editor: para imágenes,
   // una carpeta de imágenes que ya exista; si no, la del archivo abierto.
@@ -219,6 +297,15 @@
     const path = ctx?.path ?? s?.path
     if (!s || s.path !== path || !path.endsWith('.typ')) {
       toast('No hay un archivo .typ abierto donde insertar la imagen: inserta la referencia a mano', 'error')
+      return
+    }
+    // Cambiar la ruta de un image("…") existente.
+    if (ctx?.replace) {
+      const { from, to } = ctx.replace
+      s.replaceRange(from.pos, to.pos, escapeString(relativePath(path, items[0].path)))
+      s.untrack(from)
+      s.untrack(to)
+      toast(`Imagen cambiada por ${items[0].path}`)
       return
     }
     let text = s.text
@@ -553,10 +640,13 @@
             </div>
           </div>
         {/if}
-        <div class="flex h-10 shrink-0 items-center gap-2 border-b border-slate-200 px-3 text-[13px] text-slate-600">
-          <span class="truncate font-mono">{currentPath || '—'}</span>
-          {#if current && !current.editable}<span class="text-slate-400">(no editable)</span>{/if}
-        </div>
+        <EditorToolbar
+          file={current && !current.editable ? `${currentPath} (no editable)` : currentPath}
+          active={fmt}
+          disabled={!current?.editable || status !== 'online'}
+          labels={() => cmd.labelsIn(collab?.text ?? '')}
+          onaction={onTool}
+        />
         <div class="relative min-h-0 flex-1">
           <div bind:this={host} class="absolute inset-0"></div>
           {#if !currentPath}
@@ -628,9 +718,23 @@
       ontoast={(m, kind) => toast(m, kind)}
       oninsert={insertMedia}
       editingFile={currentPath.endsWith('.typ') ? currentPath : null}
-      onrelease={(ctx) => collab?.untrack(ctx.at)}
+      onrelease={(ctx) => {
+        if (ctx.at) collab?.untrack(ctx.at)
+        if (ctx.replace) releaseTarget(ctx.replace)
+      }}
     />
   {/await}
+  <ImageModal
+    bind:this={imageDialog}
+    projectId={id}
+    {files}
+    onchoose={chooseImage}
+    onupload={() => imageTarget && uploadImage(imageTarget)}
+    onclose={() => {
+      releaseTarget(imageTarget)
+      imageTarget = null
+    }}
+  />
   <OptimizeModal
     projectId={id}
     {files}

@@ -38,3 +38,17 @@ export function mediaSnippet(src, caption, label) {
   const text = caption ? `#figure(\n  ${img},\n  caption: [${escapeContent(caption)}],\n) <${label}>` : `#${img}`
   return { text, select: [text.length, text.length] }
 }
+
+// Ruta del proyecto a la que apunta `rel`, escrita en el archivo `from`
+// (como la resuelve typst: relativa a su carpeta, o a la raíz si empieza por «/»).
+export function resolvePath(from, rel) {
+  const parts = rel.startsWith('/') ? [] : from.split('/').slice(0, -1)
+  for (const seg of rel.replace(/^\/+/, '').split('/')) {
+    if (seg === '..') parts.pop()
+    else if (seg && seg !== '.') parts.push(seg)
+  }
+  return parts.join('/')
+}
+
+// Contenido de una cadena Typst "…".
+export const escapeString = (s) => s.replace(/["\\]/g, (c) => '\\' + c)

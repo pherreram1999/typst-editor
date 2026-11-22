@@ -33,7 +33,9 @@
   // Inserción en el documento de las imágenes subidas: siempre #image; si se
   // escribe un pie, dentro de #figure. insertCtx es la posición donde se
   // soltaron en el editor; sin ella, se inserta en el cursor del archivo abierto.
-  let insertCtx = null // { path, at }
+  // { path, at } o, para reemplazar la ruta de un image("…"), { path, replace: { from, to } }.
+  // $state.raw: los objetos de posición se comparan por identidad en el editor.
+  let insertCtx = $state.raw(null)
   let insertOn = $state(false)
   let mediaFiles = $state([]) // [{ id, name }] imágenes en la cola de Uppy
   let captions = $state({}) // id -> pie de figura
@@ -132,6 +134,22 @@
     open = true
   }
 
+  // Botón «Insertar imagen» del editor: solo imágenes, insertándolas en `insert`.
+  export function openInsertImage({ folder = '', insert }) {
+    if (uploading) {
+      ontoast?.('Espera a que termine la subida en curso', 'error')
+      onrelease?.(insert)
+      return
+    }
+    openUpload(folder)
+    asking = true
+    insertCtx = insert
+    insertOn = true
+    uppy.setOptions({
+      restrictions: { maxFileSize: MAX, maxNumberOfFiles: insert.replace ? 1 : null, allowedFileTypes: ['image/*', '.svg'] },
+    })
+  }
+
   // Archivos soltados en la página. autostart: subir ya a folder (explorador);
   // si no, se muestran y se pregunta la carpeta (editor).
   export function addFiles(list, { folder = '', autostart = false, insert = null } = {}) {
@@ -214,7 +232,11 @@
           </span>
         </label>
       {/if}
-      {#if hasMedia}
+      {#if insertCtx?.replace && mode.kind === 'upload'}
+        <p class="rounded-lg border border-slate-200 p-3 text-sm text-slate-600">
+          La imagen subida sustituirá a la que usa el código en <code class="font-mono text-xs">{insertCtx.path}</code>.
+        </p>
+      {:else if hasMedia}
         <fieldset class="flex flex-col gap-2 rounded-lg border border-slate-200 p-3" disabled={uploading}>
           <label class="flex items-start gap-2.5 text-sm text-slate-700">
             <input type="checkbox" bind:checked={insertOn} class="mt-0.5 size-4 accent-blue-800" />
