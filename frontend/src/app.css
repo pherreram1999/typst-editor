@@ -1,12 +1,171 @@
 @import "tailwindcss";
 
-/* Tokens de diseño: color principal blue-800, neutros slate, tipografía Inter */
+/* Tokens de diseño: color principal blue-800, neutros slate, tipografía Inter.
+   Los fondos de paneles y tarjetas usan bg-surface (no bg-white: text-white
+   va sobre fondos de color y debe seguir siendo blanco en todos los temas). */
 @theme {
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
   --color-primary: var(--color-blue-800);
   --color-primary-hover: var(--color-blue-900);
   --color-primary-soft: var(--color-blue-100);
   --color-primary-tint: var(--color-blue-50);
+  --color-surface: #ffffff;
+  --color-nav: var(--color-primary);
+}
+
+/* ---------- Temas ----------
+   Cada tema redefine la paleta de Tailwind que usa la interfaz (neutros slate,
+   tintas de estado y el color principal), así que las clases de los
+   componentes no cambian. <html data-theme="…"> lo fija lib/theme.svelte.js
+   (y un script en index.html antes de pintar, para evitar el destello).
+   --syn-* y --editor-* colorean CodeMirror (lib/editor). */
+:root {
+  --fg-lift: 0%; /* aclara colores fijos (p. ej. de carpetas) en el tema oscuro */
+  --editor-active-line: #f8faff;
+  --editor-selection: #dbeafe;
+  --syn-heading: #1e40af;
+  --syn-keyword: #7c3aed;
+  --syn-number: #b45309;
+  --syn-string: #047857;
+  --syn-comment: #64748b;
+  --syn-function: #1d4ed8;
+  --syn-variable: #0e7490;
+  --syn-label: #be185d;
+  --syn-mono: #334155;
+  --syn-mono-bg: #f1f5f9;
+  --syn-list: #c2410c;
+  --syn-operator: #475569;
+}
+
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --fg-lift: 45%;
+  --color-surface: #161b22;
+  --color-nav: #0f1a2e;
+  --color-primary: #4f8ff7;
+  --color-primary-hover: #6ba1fa;
+  --color-primary-soft: #1d3157;
+  --color-primary-tint: #14213a;
+  --color-slate-50: #0d1117;
+  --color-slate-100: #1b212b;
+  --color-slate-200: #2a313c;
+  --color-slate-300: #3a4350;
+  --color-slate-400: #6b7584;
+  --color-slate-500: #8b95a4;
+  --color-slate-600: #a8b1bd;
+  --color-slate-700: #c3cad4;
+  --color-slate-800: #d9dfe7;
+  --color-slate-900: #e6ebf1;
+  --color-slate-950: #f4f6f9;
+  --color-blue-50: #14213a;
+  --color-blue-100: #1d3157;
+  --color-blue-200: #284a7e;
+  --color-blue-300: #3b67a8;
+  --color-blue-800: #8fb8ff;
+  --color-blue-900: #c2d8ff;
+  --color-red-50: #2b1517;
+  --color-red-100: #3d1b1f;
+  --color-red-200: #63262c;
+  --color-red-600: #f26d6d;
+  --color-red-700: #ff8f8f;
+  --color-red-800: #ffb3b3;
+  --color-amber-50: #2a2312;
+  --color-amber-100: #3b2f12;
+  --color-amber-200: #5c4715;
+  --color-amber-300: #7a5d16;
+  --color-amber-700: #f5c451;
+  --color-amber-800: #fbd877;
+  --color-emerald-100: #11302a;
+  --color-emerald-700: #5fd7a8;
+  --color-emerald-800: #8ce6c2;
+  --color-violet-100: #261f45;
+  --color-violet-200: #362b63;
+  --color-violet-300: #4b3d85;
+  --color-violet-700: #b9a8ff;
+  --color-violet-800: #d0c4ff;
+  --color-sky-700: #6cc6f0;
+  --editor-active-line: #1a2130;
+  --editor-selection: #26406b;
+  --syn-heading: #8fb8ff;
+  --syn-keyword: #c4a5ff;
+  --syn-number: #f2b866;
+  --syn-string: #74d6a8;
+  --syn-comment: #7d8796;
+  --syn-function: #79aaff;
+  --syn-variable: #5fd0e6;
+  --syn-label: #f28bbd;
+  --syn-mono: #d9dfe7;
+  --syn-mono-bg: #222a36;
+  --syn-list: #ff9e64;
+  --syn-operator: #a8b1bd;
+}
+
+/* Solarized (claro) de Ethan Schoonover: base3/base2 de fondo, base00/01 de texto. */
+html[data-theme="solarized"] {
+  --color-surface: #fdf6e3;
+  --color-nav: #073642;
+  --color-primary: #268bd2;
+  --color-primary-hover: #1e6fa8;
+  --color-primary-soft: #dbe6e0;
+  --color-primary-tint: #ecefe2;
+  --color-slate-50: #eee8d5;
+  --color-slate-100: #e7e0ca;
+  --color-slate-200: #ddd5bd;
+  --color-slate-300: #cdc5ad;
+  --color-slate-400: #93a1a1;
+  --color-slate-500: #839496;
+  --color-slate-600: #657b83;
+  --color-slate-700: #586e75;
+  --color-slate-800: #3d575e;
+  --color-slate-900: #073642;
+  --color-slate-950: #002b36;
+  --color-blue-50: #ecefe2;
+  --color-blue-100: #dbe6e0;
+  --color-blue-200: #b9d3dd;
+  --color-blue-300: #8fbfdc;
+  --color-blue-800: #268bd2;
+  --color-blue-900: #1c5f8e;
+  --color-red-50: #f8e7d6;
+  --color-red-100: #f5dccb;
+  --color-red-200: #ecc0ae;
+  --color-red-600: #dc322f;
+  --color-red-700: #c22a27;
+  --color-red-800: #a52421;
+  --color-amber-50: #f6edcc;
+  --color-amber-100: #f2e6bb;
+  --color-amber-200: #eadb9e;
+  --color-amber-300: #e2cd7c;
+  --color-amber-500: #b58900;
+  --color-amber-700: #8f6c00;
+  --color-amber-800: #735600;
+  --color-emerald-100: #e6eac4;
+  --color-emerald-500: #859900;
+  --color-emerald-600: #738500;
+  --color-emerald-700: #5f6e00;
+  --color-emerald-800: #4b5700;
+  --color-violet-100: #e9e2dc;
+  --color-violet-200: #ddd3d6;
+  --color-violet-300: #c4bbd8;
+  --color-violet-600: #6c71c4;
+  --color-violet-700: #5a5fb0;
+  --color-violet-800: #4a4e96;
+  --color-sky-500: #2aa198;
+  --color-sky-700: #1f7f78;
+  --color-rose-600: #d33682;
+  --editor-active-line: #f5eed9;
+  --editor-selection: #e4dcc3;
+  --syn-heading: #268bd2;
+  --syn-keyword: #859900;
+  --syn-number: #d33682;
+  --syn-string: #2aa198;
+  --syn-comment: #93a1a1;
+  --syn-function: #268bd2;
+  --syn-variable: #b58900;
+  --syn-label: #6c71c4;
+  --syn-mono: #586e75;
+  --syn-mono-bg: #eee8d5;
+  --syn-list: #cb4b16;
+  --syn-operator: #657b83;
 }
 
 @layer base {
@@ -28,7 +187,7 @@
     @apply btn bg-primary text-white hover:bg-primary-hover;
   }
   .btn-secondary {
-    @apply btn border border-slate-300 bg-white text-primary hover:bg-primary-tint;
+    @apply btn border border-slate-300 bg-surface text-primary hover:bg-primary-tint;
   }
   .btn-sm {
     @apply h-9 px-3 text-[13px] font-medium;
@@ -37,11 +196,11 @@
     @apply text-[13px] font-medium text-slate-700;
   }
   .input {
-    @apply h-11 w-full rounded-lg border border-slate-300 bg-white px-3 text-sm text-slate-900 placeholder:text-slate-400
+    @apply h-11 w-full rounded-lg border border-slate-300 bg-surface px-3 text-sm text-slate-900 placeholder:text-slate-400
       focus:border-primary focus:outline-none focus:ring-4 focus:ring-primary-soft;
   }
   .card {
-    @apply rounded-xl border border-slate-200 bg-white shadow-sm;
+    @apply rounded-xl border border-slate-200 bg-surface shadow-sm;
   }
   .badge {
     @apply inline-flex rounded-full px-2.5 py-1 text-xs font-semibold;

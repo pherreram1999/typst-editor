@@ -149,7 +149,7 @@
           <ul
             id="invite-suggestions"
             role="listbox"
-            class="absolute top-12 right-0 left-0 z-10 overflow-hidden rounded-lg border border-slate-200 bg-white py-1 shadow-lg"
+            class="absolute top-12 right-0 left-0 z-10 overflow-hidden rounded-lg border border-slate-200 bg-surface py-1 shadow-lg"
           >
             {#each suggestions as u, i (u.id)}
               <li role="option" aria-selected={i === highlighted}>

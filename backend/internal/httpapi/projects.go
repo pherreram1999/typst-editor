@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"compress/gzip"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -19,6 +20,7 @@ import (
 
 	"typsteditor/backend/internal/collab"
 	"typsteditor/backend/internal/gitsync"
+	"typsteditor/backend/internal/imgopt"
 	"typsteditor/backend/internal/typst"
 )
 
@@ -599,8 +601,13 @@ func (s *Server) uploadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
+	// path: reemplazar un archivo existente (con otro nombre de origen);
+	// si no, se guarda con su nombre en dir.
 	name := path.Base(strings.ReplaceAll(hdr.Filename, `\`, "/"))
-	if dir := strings.TrimSpace(r.FormValue("dir")); dir != "" {
+	replace := strings.TrimSpace(r.FormValue("path"))
+	if replace != "" {
+		name = replace
+	} else if dir := strings.TrimSpace(r.FormValue("dir")); dir != "" {
 		name = dir + "/" + name
 	}
 	rel, err := cleanPath(name)
@@ -609,6 +616,12 @@ func (s *Server) uploadFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	abs := filepath.Join(s.projectDir(p.ID), filepath.FromSlash(rel))
+	if replace != "" {
+		if _, _, err := s.regularFile(p.ID, rel); err != nil {
+			writeError(w, http.StatusNotFound, "el archivo a reemplazar no existe")
+			return
+		}
+	}
 	if fi, err := os.Lstat(abs); err == nil && !fi.Mode().IsRegular() {
 		writeError(w, http.StatusBadRequest, "ya existe una entrada con ese nombre")
 		return
@@ -622,6 +635,13 @@ func (s *Server) uploadFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "archivo demasiado grande (máx. 20 MB)")
 		return
 	}
+	var opt *imgopt.Result
+	if r.FormValue("optimize") == "1" && isImage(rel) {
+		longRequest(w, 3*time.Minute)
+		var res imgopt.Result
+		data, res = imgopt.Optimize(data)
+		opt = &res
+	}
 	if err := os.WriteFile(abs, data, 0o644); err != nil {
 		writeError(w, http.StatusInternalServerError, "no se pudo guardar el archivo")
 		return
@@ -633,7 +653,88 @@ func (s *Server) uploadFile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.hub.BumpRev(p.ID, true)
-	writeJSON(w, http.StatusCreated, FileEntry{Path: rel, Size: int64(len(data)), Editable: isEditable(rel)})
+	writeJSON(w, http.StatusCreated, uploadResult{FileEntry{Path: rel, Size: int64(len(data)), Editable: isEditable(rel)}, opt})
+}
+
+type uploadResult struct {
+	FileEntry
+	Optimized *imgopt.Result `json:"optimized,omitempty"`
+}
+
+func isImage(rel string) bool {
+	switch strings.ToLower(path.Ext(rel)) {
+	case ".png", ".jpg", ".jpeg":
+		return true
+	}
+	return false
+}
+
+// optimizeImage reduce sin pérdida una imagen del proyecto (ver imgopt).
+// Se procesa de una en una para que el cliente muestre el progreso.
+func (s *Server) optimizeImage(w http.ResponseWriter, r *http.Request) {
+	p, ok := s.loadProject(w, r)
+	if !ok {
+		return
+	}
+	var in struct {
+		Path string `json:"path"`
+	}
+	if err := decode(r, &in); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	rel, err := cleanPath(in.Path)
+	if err != nil || !isImage(rel) {
+		writeError(w, http.StatusBadRequest, "solo se optimizan imágenes PNG o JPEG")
+		return
+	}
+	longRequest(w, 3*time.Minute)
+	abs, _, err := s.regularFile(p.ID, rel)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "archivo no encontrado")
+		return
+	}
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "no se pudo leer el archivo")
+		return
+	}
+	out, res := imgopt.Optimize(data)
+	if res.After < res.Before {
+		// Bajo el candado del proyecto, para no cambiarla en plena compilación.
+		mu := s.projectLock(p.ID)
+		mu.Lock()
+		err := writeFileAtomic(abs, out)
+		mu.Unlock()
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "no se pudo guardar el archivo")
+			return
+		}
+		s.hub.BumpRev(p.ID, true)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"path": rel, "result": res})
+}
+
+// writeFileAtomic escribe mediante un temporal en el mismo directorio.
+func writeFileAtomic(path string, data []byte) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
+	if err != nil {
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		os.Remove(tmp.Name())
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmp.Name())
+		return err
+	}
+	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
+		os.Remove(tmp.Name())
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
 func (s *Server) rawFile(w http.ResponseWriter, r *http.Request) {
@@ -704,11 +805,19 @@ type compileCache struct {
 	mu         sync.Mutex
 	svgRev     int64
 	svgValid   bool
-	svg        map[string]any
+	svg        map[string]any // respuesta de /preview (solo metadatos)
+	pages      []typst.Page   // páginas de la última compilación correcta
+	prevPages  []typst.Page   // y de la anterior (aún se pueden pedir)
 	pdfRev     int64
 	pdfValid   bool
 	thumbRev   int64
 	thumbValid bool
+	// Mapa de sincronización vista previa ↔ código (su propio mutex: no
+	// debe bloquear las peticiones de /preview mientras se calcula).
+	syncMu    sync.Mutex
+	syncRev   int64
+	syncValid bool
+	sync      []typst.SyncPoint
 }
 
 func (s *Server) cacheFor(id int64) *compileCache {
@@ -716,12 +825,17 @@ func (s *Server) cacheFor(id int64) *compileCache {
 	return c.(*compileCache)
 }
 
+// preview compila la vista previa y devuelve sus diagnósticos y, por página,
+// su hash y tamaño. El contenido de cada página se pide aparte (previewPage):
+// un documento de cientos de páginas ocupa cientos de MB en SVG y el
+// navegador solo descarga las que se ven y las que cambiaron.
 func (s *Server) preview(w http.ResponseWriter, r *http.Request) {
 	p, ok := s.loadProject(w, r)
 	if !ok {
 		return
 	}
-	longRequest(w, 2*time.Minute)
+	// La primera vez se generan las copias reducidas de las imágenes.
+	longRequest(w, 5*time.Minute)
 	c := s.cacheFor(p.ID)
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -733,7 +847,7 @@ func (s *Server) preview(w http.ResponseWriter, r *http.Request) {
 	mu := s.projectLock(p.ID)
 	mu.Lock()
 	s.hub.FlushProject(p.ID)
-	pages, diags, err := s.typst.SVG(r.Context(), s.projectDir(p.ID), p.MainFile, s.buildDir(p.ID))
+	pages, diags, err := s.typst.Preview(r.Context(), s.projectDir(p.ID), p.MainFile, s.buildDir(p.ID))
 	mu.Unlock()
 	if diags == nil {
 		diags = []typst.Diagnostic{}
@@ -748,9 +862,81 @@ func (s *Server) preview(w http.ResponseWriter, r *http.Request) {
 		return
 	default:
 		out = map[string]any{"ok": true, "rev": rev, "pages": pages, "diagnostics": diags}
+		c.prevPages, c.pages = c.pages, pages
+		typst.PrunePages(s.buildDir(p.ID), c.prevPages, c.pages)
 	}
 	c.svg, c.svgRev, c.svgValid = out, rev, true
 	writeJSON(w, http.StatusOK, out)
+}
+
+// previewPage sirve el SVG de una página por su hash. El contenido nunca
+// cambia para un hash dado, así que el navegador lo guarda en caché.
+func (s *Server) previewPage(w http.ResponseWriter, r *http.Request) {
+	p, ok := s.loadProject(w, r)
+	if !ok {
+		return
+	}
+	file, ok := typst.PagePath(s.buildDir(p.ID), r.PathValue("hash"))
+	if !ok {
+		writeError(w, http.StatusNotFound, "página no disponible; vuelve a compilar")
+		return
+	}
+	f, err := os.Open(file)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "página no disponible; vuelve a compilar")
+		return
+	}
+	defer f.Close()
+	h := w.Header()
+	h.Set("Content-Type", "image/svg+xml")
+	h.Set("Cache-Control", "private, max-age=31536000, immutable")
+	h.Set("Content-Security-Policy", "default-src 'none'; img-src data:; style-src 'unsafe-inline'")
+	h.Set("X-Content-Type-Options", "nosniff")
+	h.Set("Vary", "Accept-Encoding")
+	// Con gzip, el SVG de typst (trazos de glifos) ocupa aproximadamente la mitad.
+	if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+		_, _ = io.Copy(w, f)
+		return
+	}
+	h.Set("Content-Encoding", "gzip")
+	gz, _ := gzip.NewWriterLevel(w, gzip.BestSpeed)
+	_, _ = io.Copy(gz, f)
+	_ = gz.Close()
+}
+
+// previewSync devuelve los puntos que relacionan posiciones de la vista
+// previa con archivo y línea del código (ver typst/sync.go).
+func (s *Server) previewSync(w http.ResponseWriter, r *http.Request) {
+	p, ok := s.loadProject(w, r)
+	if !ok {
+		return
+	}
+	longRequest(w, 5*time.Minute)
+	c := s.cacheFor(p.ID)
+	c.syncMu.Lock()
+	defer c.syncMu.Unlock()
+	rev := s.hub.Rev(p.ID)
+	if !(c.syncValid && c.syncRev == rev) {
+		mu := s.projectLock(p.ID)
+		mu.Lock()
+		s.hub.FlushProject(p.ID)
+		pts, err := s.typst.SyncMap(r.Context(), s.projectDir(p.ID), p.MainFile, s.buildDir(p.ID))
+		mu.Unlock()
+		var ce *typst.CompileError
+		if errors.As(err, &ce) {
+			writeError(w, http.StatusUnprocessableEntity, "el documento no compila")
+			return
+		}
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "no se pudo ejecutar typst: "+err.Error())
+			return
+		}
+		if pts == nil {
+			pts = []typst.SyncPoint{}
+		}
+		c.sync, c.syncRev, c.syncValid = pts, rev, true
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"rev": rev, "points": c.sync})
 }
 
 func (s *Server) pdf(w http.ResponseWriter, r *http.Request) {

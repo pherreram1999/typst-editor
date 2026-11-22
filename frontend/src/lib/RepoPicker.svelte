@@ -156,7 +156,7 @@
               onclick={() => pick(r)}
             >
               <span class="flex items-center gap-2 text-sm">
-                <span class="size-3.5 shrink-0 rounded-full border-2 {isSel ? 'border-primary bg-primary ring-2 ring-white ring-inset' : 'border-slate-300'}"></span>
+                <span class="size-3.5 shrink-0 rounded-full border-2 {isSel ? 'border-primary bg-primary ring-2 ring-surface ring-inset' : 'border-slate-300'}"></span>
                 <span class="truncate font-medium {isSel ? 'text-primary' : 'text-slate-900'}">{r.full_name}</span>
                 <span class="badge !py-0 {r.private ? 'bg-amber-100 text-amber-800' : 'bg-slate-100 text-slate-600'}">{r.private ? 'privado' : 'público'}</span>
                 {#if r.empty}<span class="badge !py-0 bg-slate-100 text-slate-600">vacío</span>{/if}

@@ -6,9 +6,13 @@
   import { d } from '../lib/motion.js'
   import Modal from '../lib/Modal.svelte'
   import { CollabSession } from '../lib/editor/collab-client.js'
+  import { relativePath, figureLabel, mediaSnippet } from '../lib/editor/snippets.js'
   import Preview from '../lib/workspace/Preview.svelte'
   import PdfView from '../lib/workspace/PdfView.svelte'
+  import ProblemsPanel from '../lib/workspace/ProblemsPanel.svelte'
   import ShareModal from '../lib/workspace/ShareModal.svelte'
+  import FileTree from '../lib/workspace/FileTree.svelte'
+  import OptimizeModal from '../lib/workspace/OptimizeModal.svelte'
   import RepoPicker from '../lib/RepoPicker.svelte'
 
   let { id } = $props()
@@ -23,7 +27,16 @@
   let tab = $state('preview') // preview | pdf
   let pane = $state('editor') // en pantallas pequeñas: editor | output
   let showFiles = $state(true)
+  let preview = $state() // componente de la vista previa (reveal)
+  let compileResult = $state(null) // última compilación de la vista previa (diagnósticos)
   let rightWidth = $state(45) // % del ancho para la vista previa
+  // En pantallas grandes (lg) el panel de salida siempre está a la vista; en
+  // las pequeñas solo cuando se elige. Oculto, no se compila la vista previa.
+  const lgQuery = matchMedia('(min-width: 64rem)')
+  let wide = $state(lgQuery.matches)
+  const onLg = (e) => (wide = e.matches)
+  lgQuery.addEventListener('change', onLg)
+  const outputVisible = $derived(wide || pane === 'output')
   let host = $state()
   let collab = null
   let pendingGoto = null
@@ -69,6 +82,16 @@
       projectId: id,
       path,
       parent: host,
+      // Clic en el código: llevar la vista previa a ese punto.
+      // Archivos soltados en el código: se pregunta la carpeta.
+      onFilesDrop: (list, at) => {
+        editorDrag = 0
+        if (!uploader) return s.untrack(at)
+        uploader.addFiles(list, { folder: suggestFolder(list), insert: { path, at } })
+      },
+      onCursorClick: ({ line }) => {
+        if (tab === 'preview' && outputVisible) preview?.reveal(path, line)
+      },
       onStatus: (st, detail, revoked) => {
         if (st === 'closed' && revoked) {
           toast(detail || 'Ya no tienes acceso a este proyecto', 'error')
@@ -157,7 +180,6 @@
   let newFileOpen = $state(false)
   let newFilePath = $state('')
   let fileError = $state('')
-  let uploadInput = $state()
 
   async function createFile(e) {
     e.preventDefault()
@@ -174,19 +196,61 @@
     }
   }
 
-  async function upload(e) {
-    const list = [...e.target.files]
-    e.target.value = ''
-    for (const file of list) {
-      try {
-        await api.uploadFile(id, file)
-        toast(`«${file.name}» subido`)
-      } catch (err) {
-        toast(`${file.name}: ${err.message}`, 'error')
-      }
+  let uploader = $state() // UploadModal (openUpload / openReplace)
+  // Uppy pesa ~280 KB: se carga aparte, después de abrir el proyecto.
+  const uploadModal = import('../lib/workspace/UploadModal.svelte')
+  let editorDrag = $state(0) // >0 mientras se arrastran archivos sobre el editor
+
+  // Carpeta propuesta para archivos soltados en el editor: para imágenes,
+  // una carpeta de imágenes que ya exista; si no, la del archivo abierto.
+  function suggestFolder(list) {
+    const dirs = new Set(files.map((f) => (f.path.includes('/') ? f.path.slice(0, f.path.lastIndexOf('/')) : '')))
+    if (list.every((f) => f.type.startsWith('image/'))) {
+      const known = ['media', 'imagenes', 'imágenes', 'images', 'img', 'figuras', 'figures', 'assets']
+      const hit = [...dirs].filter((d) => known.includes(d.split('/').pop().toLowerCase())).sort((a, b) => a.length - b.length)[0]
+      if (hit) return hit
     }
-    loadFiles().catch(() => {})
+    return currentPath.includes('/') ? currentPath.slice(0, currentPath.lastIndexOf('/')) : ''
   }
+  // Medios soltados en el editor y ya subidos: insertarlos donde se soltaron.
+  // ctx: donde se soltaron en el editor; sin ctx, en el cursor del archivo abierto.
+  function insertMedia({ ctx, items }) {
+    const s = collab
+    const path = ctx?.path ?? s?.path
+    if (!s || s.path !== path || !path.endsWith('.typ')) {
+      toast('No hay un archivo .typ abierto donde insertar la imagen: inserta la referencia a mano', 'error')
+      return
+    }
+    let text = s.text
+    const parts = items.map((it) => {
+      const label = figureLabel(it.path, text)
+      text += `<${label}>` // etiquetas distintas entre las de esta misma inserción
+      return mediaSnippet(relativePath(path, it.path), it.caption, label)
+    })
+    const joined = parts.map((x) => x.text).join('\n\n')
+    s.insertBlock(ctx ? ctx.at.pos : s.cursor, joined, [joined.length, joined.length])
+    if (ctx) s.untrack(ctx.at)
+    pane = 'editor'
+  }
+
+  const dragHasFiles = (e) => [...(e.dataTransfer?.types ?? [])].includes('Files')
+
+  // Soltar archivos fuera de las zonas previstas no debe abrirlos en el navegador.
+  $effect(() => {
+    const stop = (e) => dragHasFiles(e) && e.preventDefault()
+    const reset = () => (editorDrag = 0)
+    window.addEventListener('dragover', stop)
+    window.addEventListener('drop', stop)
+    window.addEventListener('drop', reset, true)
+    window.addEventListener('dragend', reset)
+    return () => {
+      window.removeEventListener('dragover', stop)
+      window.removeEventListener('drop', stop)
+      window.removeEventListener('drop', reset, true)
+      window.removeEventListener('dragend', reset)
+    }
+  })
+  let optimizeOpen = $state(false)
 
   async function removeFile(f) {
     if (!confirm(`¿Eliminar «${f.path}»? Se borrará para todos los usuarios.`)) return
@@ -199,7 +263,6 @@
     }
   }
 
-  const fmtSize = (n) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(0)} KB` : `${(n / 1048576).toFixed(1)} MB`)
 
   // ---------- git ----------
   let gitBusy = $state('') // '' | pull | push
@@ -335,7 +398,10 @@
     window.addEventListener('pointerup', up)
   }
 
-  onDestroy(() => collab?.destroy())
+  onDestroy(() => {
+    collab?.destroy()
+    lgQuery.removeEventListener('change', onLg)
+  })
 
   const statusLabel = { connecting: 'Conectando…', online: 'Sincronizado', offline: 'Sin conexión, reintentando…', closed: 'Cerrado' }
   const statusColor = { connecting: 'bg-amber-500', online: 'bg-emerald-500', offline: 'bg-red-500', closed: 'bg-slate-400' }
@@ -348,7 +414,7 @@
 {:else}
   <div class="flex h-[calc(100dvh-3.5rem)] flex-col">
     <!-- Barra superior -->
-    <header class="flex min-h-12 shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-b border-slate-200 bg-white px-3 py-1.5">
+    <header class="flex min-h-12 shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-b border-slate-200 bg-surface px-3 py-1.5">
       <div class="flex min-w-0 items-center gap-2">
         <button
           type="button"
@@ -372,7 +438,7 @@
         <div class="flex -space-x-1.5" aria-label="Usuarios conectados">
           {#each people as p (p.user_id)}
             <span
-              class="flex size-7 items-center justify-center rounded-full text-[11px] font-semibold text-white ring-2 ring-white"
+              class="flex size-7 items-center justify-center rounded-full text-[11px] font-semibold text-white ring-2 ring-surface"
               style="background-color: {p.color}"
               title="{p.name} — {p.paths.join(', ')}"
               transition:fly={{ y: -4, duration: d(150) }}>{initials(p.name)}</span
@@ -406,7 +472,7 @@
     </header>
 
     <!-- Selector de panel en pantallas pequeñas -->
-    <div class="flex shrink-0 border-b border-slate-200 bg-white lg:hidden" role="tablist">
+    <div class="flex shrink-0 border-b border-slate-200 bg-surface lg:hidden" role="tablist">
       {#each [['editor', 'Editor'], ['output', 'Vista previa / PDF']] as [k, label]}
         <button
           type="button"
@@ -421,7 +487,7 @@
     <div class="flex min-h-0 flex-1" bind:this={split}>
       <!-- Archivos -->
       {#if showFiles}
-        <aside class="flex w-56 shrink-0 flex-col border-r border-slate-200 bg-slate-50 {pane === 'editor' ? '' : 'max-lg:hidden'}">
+        <aside class="flex w-60 shrink-0 flex-col border-r border-slate-200 bg-slate-50 {pane === 'editor' ? '' : 'max-lg:hidden'}">
           <div class="flex items-center justify-between px-3 pt-3 pb-2">
             <span class="text-xs font-semibold tracking-wide text-slate-500 uppercase">Archivos</span>
             <div class="flex gap-1">
@@ -441,54 +507,52 @@
               <button
                 type="button"
                 class="flex size-7 cursor-pointer items-center justify-center rounded-md text-slate-500 hover:bg-slate-200 hover:text-slate-900"
-                onclick={() => uploadInput.click()}
-                title="Subir archivos (imágenes, fuentes, .bib…)"
+                onclick={() => uploader?.openUpload()}
+                title="Subir archivos (imágenes, fuentes, .bib…); también puedes soltarlos aquí"
                 aria-label="Subir archivos"
               >
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" /></svg>
               </button>
-              <input type="file" multiple class="hidden" bind:this={uploadInput} onchange={upload} />
+              <button
+                type="button"
+                class="flex size-7 cursor-pointer items-center justify-center rounded-md text-slate-500 hover:bg-slate-200 hover:text-slate-900"
+                onclick={() => (optimizeOpen = true)}
+                title="Optimizar imágenes sin pérdida"
+                aria-label="Optimizar imágenes"
+              >
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9zM19 15l.8 2 2 .8-2 .8-.8 2-.8-2-2-.8 2-.8zM5 3l.6 1.4L7 5l-1.4.6L5 7l-.6-1.4L3 5l1.4-.6z" /></svg>
+              </button>
             </div>
           </div>
-          <ul class="min-h-0 flex-1 overflow-y-auto px-1.5 pb-3">
-            {#each files as f (f.path)}
-              <li class="group relative">
-                <button
-                  type="button"
-                  class="flex w-full cursor-pointer items-center gap-2 rounded-md py-1.5 pr-8 pl-2 text-left text-[13px] {f.path === currentPath
-                    ? 'bg-primary-soft font-semibold text-primary'
-                    : 'text-slate-700 hover:bg-slate-200/70'}"
-                  onclick={() => openFile(f)}
-                  title={f.editable ? f.path : `${f.path} (${fmtSize(f.size)}) — abrir`}
-                >
-                  <span class="shrink-0 text-slate-400" aria-hidden="true">{f.editable ? '¶' : '◫'}</span>
-                  <span class="truncate">{f.path}</span>
-                  {#if f.path === project.main_file}
-                    <span class="ml-auto shrink-0 rounded bg-primary px-1 text-[10px] font-semibold text-white">main</span>
-                  {/if}
-                  {#each people.filter((p) => p.paths.includes(f.path) && p.user_id !== session.user.id) as p (p.user_id)}
-                    <span class="size-2 shrink-0 rounded-full" style="background-color: {p.color}" title={p.name}></span>
-                  {/each}
-                </button>
-                {#if f.path !== project.main_file}
-                  <button
-                    type="button"
-                    class="absolute top-1/2 right-1 hidden size-6 -translate-y-1/2 cursor-pointer items-center justify-center rounded text-slate-400 group-hover:flex hover:bg-red-100 hover:text-red-700"
-                    onclick={() => removeFile(f)}
-                    aria-label="Eliminar {f.path}"
-                    title="Eliminar"
-                  >
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6" /></svg>
-                  </button>
-                {/if}
-              </li>
-            {/each}
-          </ul>
+          <FileTree
+            projectId={id}
+            {files}
+            {currentPath}
+            mainFile={project.main_file}
+            peopleIn={(path) => people.filter((p) => p.paths.includes(path) && p.user_id !== session.user.id)}
+            onopen={openFile}
+            onremove={removeFile}
+            onreplace={(f) => uploader?.openReplace(f.path)}
+            ondropfiles={(list, folder) => uploader?.addFiles(list, { folder, autostart: true })}
+          />
         </aside>
       {/if}
 
       <!-- Editor -->
-      <section class="flex min-w-0 flex-1 flex-col bg-white {pane === 'editor' ? '' : 'max-lg:hidden'}">
+      <section
+        class="relative flex min-w-0 flex-1 flex-col bg-surface {pane === 'editor' ? '' : 'max-lg:hidden'}"
+        ondragenter={(e) => dragHasFiles(e) && editorDrag++}
+        ondragleave={(e) => dragHasFiles(e) && (editorDrag = Math.max(0, editorDrag - 1))}
+        role="presentation"
+      >
+        {#if editorDrag > 0}
+          <div class="pointer-events-none absolute inset-2 z-20 flex items-center justify-center rounded-xl border-2 border-dashed border-primary bg-primary-tint/70">
+            <div class="rounded-lg bg-surface px-4 py-3 text-center text-sm shadow-lg">
+              <p class="font-semibold text-primary">Suelta para subir los archivos</p>
+              <p class="text-xs text-slate-500">Te preguntaré en qué carpeta guardarlos</p>
+            </div>
+          </div>
+        {/if}
         <div class="flex h-10 shrink-0 items-center gap-2 border-b border-slate-200 px-3 text-[13px] text-slate-600">
           <span class="truncate font-mono">{currentPath || '—'}</span>
           {#if current && !current.editable}<span class="text-slate-400">(no editable)</span>{/if}
@@ -522,7 +586,7 @@
               role="tab"
               aria-selected={tab === k}
               class="cursor-pointer rounded-t-md border border-b-0 px-3 py-1.5 text-[13px] font-medium {tab === k
-                ? 'border-slate-200 bg-white text-primary'
+                ? 'border-slate-200 bg-surface text-primary'
                 : 'border-transparent text-slate-500 hover:text-slate-900'}"
               onclick={() => (tab = k)}>{label}</button
             >
@@ -530,12 +594,13 @@
         </div>
         <div class="min-h-0 flex-1">
           <div class="h-full {tab === 'preview' ? '' : 'hidden'}">
-            <Preview projectId={id} {refreshKey} ondiagnostic={onDiagnostic} />
+            <Preview bind:this={preview} projectId={id} {refreshKey} active={outputVisible} onresult={(r) => (compileResult = r)} onjump={onDiagnostic} />
           </div>
           <div class="h-full {tab === 'pdf' ? '' : 'hidden'}">
-            <PdfView projectId={id} {refreshKey} active={tab === 'pdf'} filename={pdfName} />
+            <PdfView projectId={id} {refreshKey} active={tab === 'pdf' && outputVisible} filename={pdfName} />
           </div>
         </div>
+        <ProblemsPanel result={compileResult} ondiagnostic={onDiagnostic} />
       </section>
     </div>
   </div>
@@ -546,7 +611,7 @@
       <div
         class="pointer-events-auto rounded-lg border px-4 py-3 text-sm shadow-lg {t.kind === 'error'
           ? 'border-red-200 bg-red-50 text-red-800'
-          : 'border-slate-200 bg-white text-slate-800'}"
+          : 'border-slate-200 bg-surface text-slate-800'}"
         transition:fly={{ y: 12, duration: d(180) }}
       >
         {t.msg}
@@ -554,6 +619,25 @@
     {/each}
   </div>
 
+  {#await uploadModal then { default: UploadModal }}
+    <UploadModal
+      bind:this={uploader}
+      projectId={id}
+      {files}
+      onuploaded={() => loadFiles().catch(() => {})}
+      ontoast={(m, kind) => toast(m, kind)}
+      oninsert={insertMedia}
+      editingFile={currentPath.endsWith('.typ') ? currentPath : null}
+      onrelease={(ctx) => collab?.untrack(ctx.at)}
+    />
+  {/await}
+  <OptimizeModal
+    projectId={id}
+    {files}
+    open={optimizeOpen}
+    onclose={() => (optimizeOpen = false)}
+    ondone={() => loadFiles().catch(() => {})}
+  />
   <ShareModal open={shareOpen} {project} {canManage} refreshKey={membersKey} onclose={() => (shareOpen = false)} />
 
   <Modal open={newFileOpen} title="Nuevo archivo" onclose={() => (newFileOpen = false)}>

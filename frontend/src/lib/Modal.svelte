@@ -62,7 +62,7 @@
       role="dialog"
       aria-modal="true"
       aria-labelledby={titleId}
-      class="card relative my-8 w-full {wide ? 'max-w-2xl' : 'max-w-md'} shadow-xl"
+      class="card relative my-8 w-full {wide === 'xl' ? 'max-w-4xl' : wide ? 'max-w-2xl' : 'max-w-md'} shadow-xl"
       in:modalIn
       out:modalOut
     >

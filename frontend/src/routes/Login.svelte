@@ -24,7 +24,7 @@
 <div class="flex min-h-screen flex-wrap">
   <aside class="flex flex-[1_1_420px] flex-col justify-between gap-8 bg-primary p-12 text-white">
     <div class="flex items-center gap-3">
-      <div class="flex size-10 items-center justify-center rounded-[10px] bg-white text-primary">
+      <div class="flex size-10 items-center justify-center rounded-[10px] bg-surface text-primary">
         <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
           stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M4 7V4h16v3" /><path d="M9 20h6" /><path d="M12 4v16" />

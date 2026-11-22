@@ -50,7 +50,7 @@ type Server struct {
 
 func New(db *sql.DB, tokens *auth.Issuer, opts Options) *Server {
 	s := &Server{db: db, tokens: tokens, opts: opts,
-		typst: &typst.Compiler{Bin: opts.TypstBin}, git: &gitsync.Git{Bin: opts.GitBin}, gh: github.New(opts.GitHubAPI)}
+		typst: typst.New(opts.TypstBin), git: &gitsync.Git{Bin: opts.GitBin}, gh: github.New(opts.GitHubAPI)}
 	s.hub = collab.NewHub(s.projectDir)
 	return s
 }
@@ -80,7 +80,10 @@ func (s *Server) Routes() http.Handler {
 	authed("DELETE /api/projects/{id}/files", s.deleteFile)
 	authed("GET /api/projects/{id}/raw", s.rawFile)
 	authed("POST /api/projects/{id}/upload", s.uploadFile)
+	authed("POST /api/projects/{id}/images/optimize", s.optimizeImage)
 	authed("GET /api/projects/{id}/preview", s.preview)
+	authed("GET /api/projects/{id}/preview/pages/{hash}", s.previewPage)
+	authed("GET /api/projects/{id}/preview/sync", s.previewSync)
 	authed("GET /api/projects/{id}/pdf", s.pdf)
 	authed("GET /api/users/search", s.searchUsers)
 	authed("GET /api/templates", s.listTemplates)

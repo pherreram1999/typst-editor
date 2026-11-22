@@ -6,6 +6,9 @@ Editor web colaborativo de documentos [Typst](https://typst.app): varias persona
 
 - **Edición simultánea sin conflictos.** CodeMirror 6 + `@codemirror/collab` (Operational Transformation con autoridad central) sobre WebSocket, con cursores y presencia de los demás usuarios.
 - **Vista previa en vivo y visor PDF**, generados con el binario `typst` del sistema. Los errores de compilación enlazan a la línea del código.
+- **Subida de archivos con Uppy** (arrastrar y soltar, carpeta de destino), **reemplazo** de imágenes y **optimización sin pérdida** de PNG/JPEG: mismos píxeles y mismo tamaño en el documento, pero mucho menos peso (los diagramas suelen bajar a la cuarta parte).
+- **Sincronización vista previa ↔ código:** un clic en la vista previa lleva al párrafo correspondiente del código y un clic en el código desplaza la vista previa hasta ese bloque y lo resalta.
+- **Documentos grandes** (tesis de cientos de páginas con muchas capturas): la vista previa se compila con copias reducidas de las imágenes que conservan su tamaño en la página, así que la paginación es la misma que la del PDF (que usa los originales). El navegador solo descarga y muestra las páginas cercanas a la vista y, al recompilar, solo las que cambiaron. `typst` corre con prioridad baja y con un límite de procesos simultáneos.
 - **Proyectos multiarchivo** (`.typ`, `.bib`, imágenes…). Cada proyecto es un repositorio git en `DATA_DIR/projects/<id>`.
 - **Plantilla por defecto** en tamaño carta (`us-letter`) y español de México (`lang: "es", region: "mx"`).
 - **Plantillas y copias.** Cualquier proyecto se puede duplicar. El propietario puede publicarlo como plantilla con categoría y descripción (p. ej. distintas carátulas). Las plantillas aparecen para todos en una galería con miniatura y se usan creando una copia.
@@ -123,7 +126,7 @@ backend/
     auth/                 emisión y validación de JWT
     httpapi/              rutas, middleware y handlers (proyectos, miembros, carpetas, plantillas, GitHub, WebSocket)
     collab/               autoridad OT: documentos abiertos, versiones, presencia
-    typst/                invocación de `typst compile` (SVG, PDF, miniatura)
+    typst/                invocación de `typst compile` (SVG, PDF, miniatura) y copias reducidas de imágenes para la vista previa
     gitsync/              pull/push con `git` (token como cabecera HTTP)
     github/               cliente mínimo de la API REST de GitHub
 frontend/src/
@@ -205,9 +208,12 @@ Todas las rutas van bajo `/api` y usan `Authorization: Bearer <token>`. La excep
 | GET · POST | `/projects/{id}/members` | GET con acceso; POST `{username}` propietario o admin |
 | DELETE | `/projects/{id}/members/{userId}` | propietario o admin; un miembro puede quitarse a sí mismo |
 | GET · POST · DELETE | `/projects/{id}/files` | con acceso (`?path=` en DELETE) |
-| POST | `/projects/{id}/upload` | con acceso; multipart `file` (máx. 20 MB) |
+| POST | `/projects/{id}/upload` | con acceso; multipart `file` (máx. 20 MB), `dir`, `path` (reemplazar un archivo existente), `optimize=1` (imágenes sin pérdida) |
+| POST | `/projects/{id}/images/optimize` | con acceso; `{path}` → optimiza sin pérdida una imagen PNG/JPEG |
 | GET | `/projects/{id}/raw?path=` | con acceso |
-| GET | `/projects/{id}/preview` | con acceso → `{ok, rev, pages[svg], diagnostics}` |
+| GET | `/projects/{id}/preview` | con acceso → `{ok, rev, pages[{hash, width, height}], diagnostics}` |
+| GET | `/projects/{id}/preview/sync` | con acceso → `{rev, points[{page, y, file, line, col}]}` (vista previa ↔ código) |
+| GET | `/projects/{id}/preview/pages/{hash}` | con acceso → SVG de una página (gzip; inmutable, se guarda en caché) |
 | GET | `/projects/{id}/pdf` | con acceso → PDF (422 con diagnósticos si falla) |
 | GET | `/projects/{id}/git/status` | con acceso |
 | POST | `/projects/{id}/git/pull` · `/git/push` | con acceso (`{message}` en push) |

@@ -467,7 +467,7 @@
 {/snippet}
 
 {#snippet folderIcon(color, size = 26)}
-  <span class="flex shrink-0 items-center justify-center rounded-[7px]" style="width:{size}px;height:{size}px;background:{fc(color).tint};color:{fc(color).fg}">
+  <span class="flex shrink-0 items-center justify-center rounded-[7px]" style="width:{size}px;height:{size}px;background:color-mix(in srgb, {fc(color).fg} 16%, var(--color-surface));color:color-mix(in srgb, {fc(color).fg}, var(--color-slate-900) var(--fg-lift))">
     <svg width={size * 0.58} height={size * 0.58} viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d={FOLDER_PATH} /></svg>
   </span>
 {/snippet}
@@ -536,7 +536,7 @@
       >
     </button>
     {#if menuFor === p.id}
-      <div class="absolute top-10 right-0 z-30 w-64 rounded-xl border border-slate-200 bg-white py-1.5 text-sm shadow-xl" role="menu">
+      <div class="absolute top-10 right-0 z-30 w-64 rounded-xl border border-slate-200 bg-surface py-1.5 text-sm shadow-xl" role="menu">
         <p class="px-3 pt-1 pb-1.5 text-[11px] font-bold tracking-[0.08em] text-slate-500 uppercase">Mover a carpeta</p>
         <button type="button" role="menuitemradio" aria-checked={p.folder_id == null}
           class="flex w-full cursor-pointer items-center gap-2.5 px-3 py-2 text-left hover:bg-slate-50"
@@ -608,7 +608,7 @@
 {#snippet folderChip(p)}
   {#if p.folder_id != null && folderById.has(p.folder_id) && !view.startsWith('folder:')}
     {@const f = folderById.get(p.folder_id)}
-    <span class="inline-flex h-6 items-center gap-1.5 rounded-md px-2 text-xs font-semibold" style="background:{fc(f.color).tint};color:{fc(f.color).fg}">
+    <span class="inline-flex h-6 items-center gap-1.5 rounded-md px-2 text-xs font-semibold" style="background:color-mix(in srgb, {fc(f.color).fg} 16%, var(--color-surface));color:color-mix(in srgb, {fc(f.color).fg}, var(--color-slate-900) var(--fg-lift))">
       <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d={FOLDER_PATH} /></svg>
       {f.name}
     </span>
@@ -633,7 +633,7 @@
   <article
     class="group relative flex h-full min-h-[214px] flex-col gap-3 rounded-[14px] border px-[18px] pt-[18px] pb-3.5 shadow-sm transition {p.starred
       ? 'border-amber-300 bg-amber-50 hover:border-amber-400'
-      : 'border-slate-200 bg-white hover:border-primary'} hover:shadow-md {dragging?.id === p.id ? 'opacity-50' : ''}"
+      : 'border-slate-200 bg-surface hover:border-primary'} hover:shadow-md {dragging?.id === p.id ? 'opacity-50' : ''}"
     draggable="true"
     ondragstart={(e) => onDragStart(e, p)}
     ondragend={() => (dragging = dropTarget = null)}
@@ -702,7 +702,7 @@
 
 {#snippet collection(list)}
   {#if layout === 'list'}
-    <div class="divide-y divide-slate-100 overflow-visible rounded-[14px] border border-slate-200 bg-white shadow-sm">
+    <div class="divide-y divide-slate-100 overflow-visible rounded-[14px] border border-slate-200 bg-surface shadow-sm">
       {#each list as p (p.id)}
         <div animate:flip={{ duration: d(220) }}>{@render row(p)}</div>
       {/each}
@@ -730,7 +730,7 @@
             type="button"
             class="h-9 cursor-pointer rounded-full px-3.5 text-sm font-medium {templateCategory === c
               ? 'bg-violet-700 text-white'
-              : 'border border-slate-200 bg-white text-slate-700 hover:border-violet-300'}"
+              : 'border border-slate-200 bg-surface text-slate-700 hover:border-violet-300'}"
             aria-pressed={templateCategory === c}
             onclick={() => (templateCategory = c)}>{c || 'Todas'}</button
           >
@@ -738,7 +738,7 @@
       </div>
     {/if}
     {#if !visibleTemplates.length}
-      <div class="flex flex-col items-center gap-3 rounded-[14px] border border-dashed border-slate-300 bg-white px-6 py-14 text-center">
+      <div class="flex flex-col items-center gap-3 rounded-[14px] border border-dashed border-slate-300 bg-surface px-6 py-14 text-center">
         <span class="text-violet-600">{@render icon('template', 28)}</span>
         <p class="text-[15px] font-medium">{templates.length ? 'Ninguna plantilla coincide' : 'Todavía no hay plantillas'}</p>
         <p class="max-w-md text-sm text-slate-600">
@@ -748,7 +748,7 @@
     {:else}
       <div class="grid grid-cols-[repeat(auto-fill,minmax(min(100%,240px),1fr))] gap-5">
         {#each visibleTemplates as t (t.id)}
-          <article class="group flex flex-col overflow-hidden rounded-[14px] border border-slate-200 bg-white shadow-sm transition hover:border-violet-400 hover:shadow-md">
+          <article class="group flex flex-col overflow-hidden rounded-[14px] border border-slate-200 bg-surface shadow-sm transition hover:border-violet-400 hover:shadow-md">
             <button type="button" class="block cursor-pointer border-b border-slate-200" onclick={() => openClone(t, true)}
               aria-label="Usar la plantilla {t.name}">
               <Thumb projectId={t.id} alt="Primera página de {t.name}" class="aspect-[17/15] w-full transition group-hover:opacity-90" />
@@ -782,7 +782,7 @@
 
 <div class="flex min-h-[calc(100dvh-3.5rem)] items-stretch">
   <!-- Barra lateral (escritorio) -->
-  <aside class="hidden w-[272px] shrink-0 border-r border-slate-200 bg-white lg:block" aria-label="Organización de proyectos">
+  <aside class="hidden w-[272px] shrink-0 border-r border-slate-200 bg-surface lg:block" aria-label="Organización de proyectos">
     <div class="sticky top-0 flex max-h-dvh min-h-[calc(100dvh-3.5rem)] flex-col gap-[22px] overflow-y-auto px-3.5 py-5">
       <button type="button" class="btn-primary !h-11 !rounded-[10px] shadow-sm" onclick={openCreate}>
         {@render icon('plus', 16)} Nuevo proyecto
@@ -864,7 +864,7 @@
               </button>
               <button
                 type="button"
-                class="absolute top-1/2 right-1.5 hidden size-7 -translate-y-1/2 cursor-pointer items-center justify-center rounded-md text-slate-500 group-hover/folder:flex hover:bg-white hover:text-slate-900 focus-visible:flex"
+                class="absolute top-1/2 right-1.5 hidden size-7 -translate-y-1/2 cursor-pointer items-center justify-center rounded-md text-slate-500 group-hover/folder:flex hover:bg-surface hover:text-slate-900 focus-visible:flex"
                 onclick={(e) => (e.stopPropagation(), startEditFolder(f))}
                 aria-label="Editar carpeta {f.name}"
                 title="Renombrar, cambiar color o eliminar"
@@ -922,7 +922,7 @@
           <input class="input !h-10 !rounded-[10px] !pl-9" type="search" bind:value={search} placeholder="Buscar por nombre, autor o repositorio…" />
         </label>
         {#if view !== 'templates'}
-        <label class="flex h-10 items-center gap-2 rounded-[10px] border border-slate-300 bg-white px-3 text-[13px] text-slate-600">
+        <label class="flex h-10 items-center gap-2 rounded-[10px] border border-slate-300 bg-surface px-3 text-[13px] text-slate-600">
           Ordenar
           <select class="cursor-pointer bg-transparent text-[13px] font-semibold text-slate-900 focus:outline-none" bind:value={sort}>
             <option value="recent">Actividad reciente</option>
@@ -934,7 +934,7 @@
             <button
               type="button"
               class="flex size-[34px] cursor-pointer items-center justify-center rounded-lg {layout === k
-                ? 'bg-white text-primary shadow-sm'
+                ? 'bg-surface text-primary shadow-sm'
                 : 'text-slate-500 hover:text-slate-900'}"
               aria-pressed={layout === k}
               aria-label={label}
@@ -955,7 +955,7 @@
           type="button"
           class="inline-flex h-10 shrink-0 cursor-pointer items-center gap-2 rounded-full px-3 text-sm font-semibold whitespace-nowrap {active
             ? 'bg-primary text-white'
-            : 'border border-slate-200 bg-white text-slate-700'}"
+            : 'border border-slate-200 bg-surface text-slate-700'}"
           onclick={() => setView(c.key)}
           aria-current={active ? 'page' : undefined}
         >
@@ -975,7 +975,7 @@
     {:else if view === 'templates'}
       {@render gallery()}
     {:else if visible.length === 0}
-      <div class="flex flex-col items-center gap-3 rounded-[14px] border border-dashed border-slate-300 bg-white px-6 py-14 text-center">
+      <div class="flex flex-col items-center gap-3 rounded-[14px] border border-dashed border-slate-300 bg-surface px-6 py-14 text-center">
         {#if search.trim()}
           <p class="text-[15px] font-medium">Ningún proyecto coincide con «{search.trim()}»</p>
         {:else if view === 'starred'}
@@ -1023,7 +1023,7 @@
           type="button"
           role="tab"
           aria-selected={form.mode === k}
-          class="h-9 cursor-pointer rounded-md text-sm font-medium {form.mode === k ? 'bg-white text-primary shadow-sm' : 'text-slate-600 hover:text-slate-900'}"
+          class="h-9 cursor-pointer rounded-md text-sm font-medium {form.mode === k ? 'bg-surface text-primary shadow-sm' : 'text-slate-600 hover:text-slate-900'}"
           onclick={() => (form.mode = k)}>{label}</button
         >
       {/each}
@@ -1038,7 +1038,7 @@
               type="button"
               role="radio"
               aria-checked={sel}
-              class="flex cursor-pointer flex-col overflow-hidden rounded-lg border-2 bg-white text-left transition {sel
+              class="flex cursor-pointer flex-col overflow-hidden rounded-lg border-2 bg-surface text-left transition {sel
                 ? 'border-violet-600 ring-2 ring-violet-200'
                 : 'border-slate-200 hover:border-violet-300'}"
               onclick={() => {

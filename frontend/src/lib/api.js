@@ -111,9 +111,12 @@ export const api = {
     if (dir) fd.append('dir', dir)
     return request('POST', `/projects/${id}/upload`, fd)
   },
+  optimizeImage: (id, path) => request('POST', `/projects/${id}/images/optimize`, { path }),
   rawFile: (id, path) => requestBlob(`/projects/${id}/raw?path=${q(path)}`),
 
   preview: (id) => request('GET', `/projects/${id}/preview`),
+  previewSync: (id) => request('GET', `/projects/${id}/preview/sync`),
+  previewPage: (id, hash) => requestBlob(`/projects/${id}/preview/pages/${hash}`),
   pdf: (id) => requestBlob(`/projects/${id}/pdf`),
 
   gitStatus: (id) => request('GET', `/projects/${id}/git/status`),
