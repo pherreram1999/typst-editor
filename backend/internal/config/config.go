@@ -3,6 +3,7 @@ package config
 import (
 	"bufio"
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,13 +11,19 @@ import (
 )
 
 type Config struct {
-	Addr          string
+	Addr string
+	// Motor de base de datos (DB_DRIVER): "mysql" (MariaDB, usa DSN) o
+	// "libsql" (Bunny Database, Turso, sqld: DBURL + DBAuthToken).
+	DBDriver      string
 	DSN           string
+	DBURL         string
+	DBAuthToken   string
 	JWTSecret     []byte
 	TokenTTL      time.Duration
 	AdminUser     string
 	AdminPassword string
 	AdminName     string
+	AdminEmail    string // correo del administrador inicial (se asigna también si aún no tiene)
 	DataDir       string // proyectos (repos git) y artefactos de compilación
 	TypstBin      string
 	GitBin        string
@@ -28,6 +35,19 @@ type Config struct {
 	// de FONT_PATHS.
 	FontDirs      []string
 	LocalFontsDir string // DATA_DIR/fonts (también está en FontDirs)
+	// URL pública del servidor (sin barra final): emisor OAuth y recurso del
+	// endpoint MCP (PUBLIC_URL/mcp). Por defecto http://localhost:<puerto>.
+	PublicURL  string
+	MCPEnabled bool
+	// Correo saliente (Resend): clave de la API (RESEND o RESEND_API_KEY) y
+	// remitente (MAIL_FROM). Sin clave no se envían correos y los enlaces de
+	// alta y de invitación se muestran a quien los crea para copiarlos.
+	ResendKey string
+	MailFrom  string
+	// MailEnabled (MAIL_ENABLED, por defecto true): false desactiva el correo
+	// aunque haya clave (p. ej. si Resend no responde). Sin correo, las cuentas
+	// nuevas reciben una contraseña temporal que hay que cambiar al entrar.
+	MailEnabled bool
 }
 
 // loadDotEnv reads KEY=VALUE pairs from path without overriding existing env vars.
@@ -81,6 +101,32 @@ func Load() (*Config, error) {
 		// según la zona horaria del servidor de base de datos.
 		"&loc=UTC&time_zone=%27%2B00%3A00%27"
 
+	driver := strings.ToLower(get("DB_DRIVER", "mysql"))
+	dbURL := get("DB_URL", os.Getenv("BUNNY_DATABASE_URL"))
+	dbToken := get("DB_AUTH_TOKEN", os.Getenv("BUNNY_DATABASE_AUTH_TOKEN"))
+	switch driver {
+	case "mysql", "mariadb":
+		driver = "mysql"
+	case "libsql":
+		if dbURL == "" {
+			return nil, errors.New("DB_DRIVER=libsql requiere DB_URL (o BUNNY_DATABASE_URL)")
+		}
+		// El driver no acepta el token en la URL: se separa si viene ahí.
+		if u, err := url.Parse(dbURL); err == nil {
+			q := u.Query()
+			if t := q.Get("authToken"); t != "" {
+				if dbToken == "" {
+					dbToken = t
+				}
+				q.Del("authToken")
+				u.RawQuery = q.Encode()
+				dbURL = u.String()
+			}
+		}
+	default:
+		return nil, errors.New("DB_DRIVER inválido: use mysql o libsql")
+	}
+
 	dataDir, err := filepath.Abs(get("DATA_DIR", "data"))
 	if err != nil {
 		return nil, errors.New("DATA_DIR inválido")
@@ -108,14 +154,37 @@ func Load() (*Config, error) {
 		}
 	}
 
+	addr := get("ADDR", ":8080")
+	publicURL := strings.TrimRight(strings.TrimSpace(os.Getenv("PUBLIC_URL")), "/")
+	if publicURL == "" {
+		port := "8080"
+		if i := strings.LastIndex(addr, ":"); i >= 0 && i < len(addr)-1 {
+			port = addr[i+1:]
+		}
+		publicURL = "http://localhost:" + port
+	}
+	u, err := url.Parse(publicURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || (u.Path != "" && u.Path != "/") {
+		return nil, errors.New("PUBLIC_URL inválida (p. ej. https://typst.ejemplo.com)")
+	}
+
 	return &Config{
-		Addr:          get("ADDR", ":8080"),
+		PublicURL:     publicURL,
+		MCPEnabled:    get("MCP_ENABLED", "true") != "false",
+		Addr:          addr,
+		DBDriver:      driver,
 		DSN:           dsn,
+		DBURL:         dbURL,
+		DBAuthToken:   dbToken,
 		JWTSecret:     []byte(secret),
 		TokenTTL:      ttl,
 		AdminUser:     get("ADMIN_USER", "admin"),
 		AdminPassword: os.Getenv("ADMIN_PASSWORD"),
 		AdminName:     get("ADMIN_NAME", "Administrador"),
+		AdminEmail:    strings.ToLower(strings.TrimSpace(os.Getenv("ADMIN_EMAIL"))),
+		ResendKey:     strings.TrimSpace(firstEnv("RESEND", "RESEND_API_KEY")),
+		MailFrom:      get("MAIL_FROM", "Typst Extend <onboarding@resend.dev>"),
+		MailEnabled:   !isFalse(os.Getenv("MAIL_ENABLED")),
 		DataDir:       dataDir,
 		TypstBin:      get("TYPST_BIN", "typst"),
 		GitBin:        get("GIT_BIN", "git"),
@@ -153,4 +222,23 @@ func defaultFontsDir() string {
 		}
 	}
 	return ""
+}
+
+// firstEnv devuelve la primera de las variables que no esté vacía.
+func firstEnv(keys ...string) string {
+	for _, k := range keys {
+		if v := os.Getenv(k); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// isFalse: «false», «0», «no» u «off» (sin distinguir mayúsculas).
+func isFalse(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "false", "0", "no", "off":
+		return true
+	}
+	return false
 }

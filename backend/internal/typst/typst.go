@@ -272,3 +272,60 @@ func (c *Compiler) Thumbnail(ctx context.Context, root, main, outDir string) (st
 	_, err = c.run(ctx, mirror, main, out, "--format", "png", "--pages", "1", "--ppi", "48")
 	return out, err
 }
+
+// pagesRe encuentra el árbol de páginas de un PDF de typst («/Type/Pages/Count N»).
+var pagesRe = regexp.MustCompile(`/Type\s*/Pages\b[^>]*?/Count\s+(\d+)`)
+
+// PDFPageCount devuelve el número de páginas de un PDF generado por typst
+// (0 si no se puede saber).
+func PDFPageCount(file string) int {
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, m := range pagesRe.FindAllSubmatch(b, -1) {
+		if v, _ := strconv.Atoi(string(m[1])); v > n {
+			n = v // la raíz del árbol cuenta todas
+		}
+	}
+	return n
+}
+
+// RenderPNG renderiza las páginas indicadas (desde 1) como PNG a la
+// resolución dada, sobre el espejo de la vista previa (imágenes reducidas,
+// misma paginación que el PDF). Devuelve el contenido de cada página pedida,
+// o nil si el documento no tiene esa página.
+func (c *Compiler) RenderPNG(ctx context.Context, root, main, outDir string, pages []int, ppi int) ([][]byte, []Diagnostic, error) {
+	mirror, err := previewRoot(outDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := syncMirror(root, mirror, main); err != nil {
+		return nil, nil, err
+	}
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		return nil, nil, err
+	}
+	tmp, err := os.MkdirTemp(outDir, "png-")
+	if err != nil {
+		return nil, nil, err
+	}
+	defer os.RemoveAll(tmp)
+	sel := make([]string, len(pages))
+	for i, p := range pages {
+		sel[i] = strconv.Itoa(p)
+	}
+	diags, err := c.run(ctx, mirror, main, filepath.Join(tmp, "page-{p}.png"),
+		"--format", "png", "--pages", strings.Join(sel, ","), "--ppi", strconv.Itoa(ppi))
+	if err != nil {
+		return nil, diags, err
+	}
+	out := make([][]byte, len(pages))
+	for i, p := range pages {
+		if b, err := os.ReadFile(filepath.Join(tmp, "page-"+strconv.Itoa(p)+".png")); err == nil {
+			out[i] = b
+		}
+	}
+	return out, diags, nil
+}

@@ -33,6 +33,12 @@ type downloadTicket struct {
 	userID    int64
 	projectID int64
 	expires   time.Time
+	// Enlaces creados por las herramientas MCP (mcp.go).
+	kind      string // "" (zip del navegador) | zip | file | pdf | upload
+	path      string // file / upload
+	grantID   int64  // concesión con la que se creó: se vuelve a comprobar al usarlo
+	overwrite bool   // upload: puede reemplazar un archivo existente
+	multi     bool   // se puede usar varias veces hasta que caduque
 }
 
 type ticketStore struct {
@@ -41,10 +47,16 @@ type ticketStore struct {
 }
 
 func (t *ticketStore) issue(userID, projectID int64) string {
+	return t.issueTicket(downloadTicket{userID: userID, projectID: projectID}, ticketTTL)
+}
+
+// issueTicket guarda un ticket que caduca en ttl y devuelve su identificador.
+func (t *ticketStore) issueTicket(v downloadTicket, ttl time.Duration) string {
 	var b [24]byte
 	_, _ = rand.Read(b[:])
 	id := hex.EncodeToString(b[:])
 	now := time.Now()
+	v.expires = now.Add(ttl)
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.m == nil {
@@ -55,17 +67,21 @@ func (t *ticketStore) issue(userID, projectID int64) string {
 			delete(t.m, k)
 		}
 	}
-	t.m[id] = downloadTicket{userID, projectID, now.Add(ticketTTL)}
+	t.m[id] = v
 	return id
 }
 
-// take consume el ticket: solo sirve una vez.
+// take consume el ticket: solo sirve una vez (salvo los multiuso, que siguen
+// valiendo hasta caducar).
 func (t *ticketStore) take(id string) (downloadTicket, bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	v, ok := t.m[id]
-	delete(t.m, id)
+	if !v.multi {
+		delete(t.m, id)
+	}
 	if !ok || time.Now().After(v.expires) {
+		delete(t.m, id)
 		return downloadTicket{}, false
 	}
 	return v, true
@@ -87,7 +103,7 @@ func (s *Server) exportTicket(w http.ResponseWriter, r *http.Request) {
 // con el ticket (ver arriba) y vuelve a comprobar el usuario y su acceso.
 func (s *Server) exportZip(w http.ResponseWriter, r *http.Request) {
 	t, ok := s.tickets.take(r.URL.Query().Get("ticket"))
-	if !ok || strconv.FormatInt(t.projectID, 10) != r.PathValue("id") {
+	if !ok || t.kind != "" || strconv.FormatInt(t.projectID, 10) != r.PathValue("id") {
 		writeError(w, http.StatusUnauthorized, "enlace de descarga inválido o caducado; vuelve a intentarlo")
 		return
 	}

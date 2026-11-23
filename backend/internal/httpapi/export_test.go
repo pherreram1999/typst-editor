@@ -64,7 +64,7 @@ func TestTicketUnSoloUso(t *testing.T) {
 		t.Fatal("el ticket se pudo usar dos veces")
 	}
 	id = s.issue(1, 2)
-	s.m[id] = downloadTicket{1, 2, time.Now().Add(-time.Second)}
+	s.m[id] = downloadTicket{userID: 1, projectID: 2, expires: time.Now().Add(-time.Second)}
 	if _, ok := s.take(id); ok {
 		t.Fatal("ticket caducado aceptado")
 	}

@@ -6,9 +6,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
-
-	"github.com/go-sql-driver/mysql"
 )
 
 // Folder es una carpeta personal para organizar proyectos. Cada usuario tiene
@@ -45,7 +44,7 @@ func (s *Server) loadFolder(w http.ResponseWriter, r *http.Request) (int64, bool
 		return 0, false
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "error interno")
+		internalError(w, err)
 		return 0, false
 	}
 	return id, true
@@ -62,7 +61,7 @@ SELECT f.id, f.name, f.color,
    WHERE pr.folder_id = f.id AND `+projectAccess+`)
 FROM project_folders f WHERE f.user_id = ? ORDER BY f.name`, u.ID, u.Role, u.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "error interno")
+		internalError(w, err)
 		return
 	}
 	defer rows.Close()
@@ -70,7 +69,7 @@ FROM project_folders f WHERE f.user_id = ? ORDER BY f.name`, u.ID, u.Role, u.ID)
 	for rows.Next() {
 		var f Folder
 		if err := rows.Scan(&f.ID, &f.Name, &f.Color, &f.Count); err != nil {
-			writeError(w, http.StatusInternalServerError, "error interno")
+			internalError(w, err)
 			return
 		}
 		out = append(out, f)
@@ -90,7 +89,7 @@ func (s *Server) saveFolder(w http.ResponseWriter, r *http.Request, id int64) {
 	f := Folder{ID: id, Color: "blue"}
 	if id != 0 {
 		if err := s.db.QueryRowContext(r.Context(), `SELECT name, color FROM project_folders WHERE id = ?`, id).Scan(&f.Name, &f.Color); err != nil {
-			writeError(w, http.StatusInternalServerError, "error interno")
+			internalError(w, err)
 			return
 		}
 	}
@@ -124,13 +123,12 @@ func (s *Server) saveFolder(w http.ResponseWriter, r *http.Request, id int64) {
 	} else {
 		_, err = s.db.ExecContext(r.Context(), `UPDATE project_folders SET name = ?, color = ? WHERE id = ?`, f.Name, f.Color, id)
 	}
-	var me *mysql.MySQLError
-	if errors.As(err, &me) && me.Number == 1062 {
+	if s.dialect.IsDuplicate(err) {
 		writeError(w, http.StatusConflict, "ya tienes una carpeta con ese nombre")
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "error interno")
+		internalError(w, err)
 		return
 	}
 	writeJSON(w, status, f)
@@ -151,7 +149,7 @@ func (s *Server) deleteFolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := s.db.ExecContext(r.Context(), `DELETE FROM project_folders WHERE id = ?`, id); err != nil {
-		writeError(w, http.StatusInternalServerError, "error interno")
+		internalError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -191,19 +189,20 @@ func (s *Server) updatePrefs(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	// starred_at conserva la fecha original si ya estaba destacado.
+	d, now := s.dialect, time.Now()
 	if _, err := s.db.ExecContext(r.Context(), `
 INSERT INTO project_user_prefs (user_id, project_id, folder_id, starred, starred_at)
-VALUES (?, ?, ?, ?, IF(?, CURRENT_TIMESTAMP, NULL))
-ON DUPLICATE KEY UPDATE
-  starred_at = IF(VALUES(starred), IF(starred, starred_at, CURRENT_TIMESTAMP), NULL),
-  starred = VALUES(starred),
-  folder_id = VALUES(folder_id)`, u.ID, p.ID, folder, starred, starred); err != nil {
-		writeError(w, http.StatusInternalServerError, "error interno")
+VALUES (?, ?, ?, ?, CASE WHEN ? THEN ? ELSE NULL END)
+`+d.OnConflict("user_id", "project_id")+`
+  starred_at = CASE WHEN `+d.Excluded("starred")+` THEN CASE WHEN starred THEN starred_at ELSE ? END ELSE NULL END,
+  starred = `+d.Excluded("starred")+`,
+  folder_id = `+d.Excluded("folder_id"), u.ID, p.ID, folder, starred, starred, now, now); err != nil {
+		internalError(w, err)
 		return
 	}
-	p, err := s.projectByID(r, u, p.ID)
+	p, err := s.projectByID(r.Context(), u, p.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "error interno")
+		internalError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, p)

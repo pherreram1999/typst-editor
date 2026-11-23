@@ -21,7 +21,7 @@ func TestStaticHandler(t *testing.T) {
 	must(os.WriteFile(filepath.Join(dir, "assets", "app-abc.js"), []byte("console.log(1)"), 0o644))
 	must(os.WriteFile(filepath.Join(dir, ".secreto"), []byte("x"), 0o644))
 
-	s := New(nil, nil, Options{DataDir: t.TempDir(), StaticDir: dir})
+	s := New(nil, nil, nil, Options{DataDir: t.TempDir(), StaticDir: dir})
 	h := s.Routes()
 
 	cases := []struct {

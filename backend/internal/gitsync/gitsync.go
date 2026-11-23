@@ -159,7 +159,7 @@ func (g *Git) Pull(ctx context.Context, dir string, r *Remote, a *Author) (strin
 	if err := g.ensureRemote(ctx, dir, r); err != nil {
 		return "", err
 	}
-	if _, err := g.commitAll(ctx, dir, a, "Cambios locales antes de pull (Typst Editor)"); err != nil {
+	if _, err := g.commitAll(ctx, dir, a, "Cambios locales antes de pull (Typst Extend)"); err != nil {
 		return "", err
 	}
 	if _, err := g.cmd(ctx, dir, r, nil, "fetch", "-q", "origin", r.Branch); err != nil {
@@ -171,11 +171,16 @@ func (g *Git) Pull(ctx context.Context, dir string, r *Remote, a *Author) (strin
 	}
 	out, err := g.cmd(ctx, dir, nil, a, "merge", "--no-edit", "--allow-unrelated-histories", "FETCH_HEAD")
 	if err != nil {
-		conflicts, _ := g.cmd(ctx, dir, nil, nil, "diff", "--name-only", "--diff-filter=U")
+		// Con conflictos se recogen las tres versiones de cada archivo y se
+		// aborta: el árbol queda limpio (los demás siguen editando) y el
+		// usuario resuelve en el editor de fusión; luego Resolve rehace la fusión.
+		ce, cerr := g.collectConflicts(ctx, dir, r.Branch)
 		_, _ = g.cmd(ctx, dir, nil, nil, "merge", "--abort")
-		if conflicts != "" {
-			return "", &UserError{Msg: "conflicto al fusionar con el remoto en: " +
-				strings.ReplaceAll(conflicts, "\n", ", ") + ". Se ha cancelado el pull; resuelve el conflicto en GitHub o edita esos archivos y vuelve a intentarlo."}
+		if cerr != nil {
+			return "", cerr
+		}
+		if ce != nil {
+			return "", ce
 		}
 		return "", err
 	}

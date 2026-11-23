@@ -1,0 +1,17 @@
+# Solo se necesita el código fuente: fuera secretos, datos y artefactos locales
+.git
+.codegraph
+.claude
+.env
+.env.*
+**/.env
+data/
+backend/data/
+backend/bin/
+public/
+typst-editor
+**/node_modules
+frontend/dist/
+*.log
+Dockerfile
+.dockerignore

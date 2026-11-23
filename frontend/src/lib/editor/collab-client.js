@@ -11,7 +11,7 @@
 //  - Si un envío se rechaza, el cliente ya habrá recibido antes los cambios que
 //    le faltaban (el servidor los manda por la misma conexión, en orden), hace
 //    rebase y reintenta.
-import { EditorState, ChangeSet, Prec } from '@codemirror/state'
+import { EditorState, ChangeSet, Prec, Compartment } from '@codemirror/state'
 import { EditorView, keymap } from '@codemirror/view'
 import { basicSetup } from 'codemirror'
 import { indentWithTab } from '@codemirror/commands'
@@ -24,8 +24,9 @@ import { wsURL } from '../api.js'
 import { formatKeymap } from './commands.js'
 import { imageHover, imageHoverTheme } from './imageHover.js'
 import { tableHover, tableHoverTheme } from './tableHover.js'
+import { marginGuide, savedMargin } from './marginGuide.js'
 
-const editorTheme = EditorView.theme({
+export const editorTheme = EditorView.theme({
   // Colores de app.css: cambian con el tema.
   '&': { height: '100%', fontSize: '14px', backgroundColor: 'var(--color-surface)', color: 'var(--color-slate-900)' },
   '.cm-scroller': { fontFamily: "'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace", lineHeight: '1.6' },
@@ -53,6 +54,18 @@ const HEARTBEAT_TIMEOUT = 8000
 // para que los clientes no lleguen todos a la vez tras reiniciar el servidor).
 const backoff = (n) => Math.min(3000, 250 * 2 ** n) * (0.8 + Math.random() * 0.4)
 
+// Los navegadores llaman «image.png» a toda imagen pegada: se le da un nombre único con la
+// fecha para no sobrescribir otra captura (ni chocar con la detección de duplicados de Uppy).
+let pasteSeq = 0
+function pastedName(f) {
+  if (f.name && !/^image\.\w+$/i.test(f.name)) return f
+  const ext = (f.type.split('/')[1] || 'png').replace('jpeg', 'jpg').replace(/\+.*/, '')
+  const d = new Date()
+  const p = (n) => String(n).padStart(2, '0')
+  const stamp = `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
+  return new File([f], `captura-${stamp}-${++pasteSeq}.${ext}`, { type: f.type, lastModified: Date.now() })
+}
+
 export class CollabSession {
   /**
    * @param {object} o
@@ -65,14 +78,16 @@ export class CollabSession {
    * @param {(msg: string) => void} [o.onWarning]
    * @param {(pos: {line: number, column: number}) => void} [o.onCursorClick] clic que deja el cursor (sin selección)
    * @param {(state: EditorState) => void} [o.onState] estado tras cada cambio o movimiento del cursor (barra de herramientas)
+   * @param {boolean} [o.readOnly] solo lectura: no se aceptan cambios del usuario ni se envían al servidor
    * @param {() => void} [o.onImage] atajo «insertar imagen»
    * @param {() => void} [o.onCite] atajo «insertar cita»
    * @param {(ctx: import('@codemirror/autocomplete').CompletionContext) => any} [o.completeCite] autocompletado tras «@» (solo .typ)
    * @param {object} [o.imageHandlers] tarjeta sobre image("…"): { resolve, onEdit } (ver imageHover.js)
    * @param {object} [o.tableHandlers] tarjeta sobre #table(…): { onEdit({ from, to }) } (ver tableHover.js)
    * @param {() => void} [o.onDocChange] el texto cambió (edición local o remota, o documento recibido); ver text y loaded
-   * @param {(files: File[], at: {pos: number}) => void} [o.onFilesDrop] archivos soltados en el editor (en vez de
-   *   insertar su contenido); `at` es la posición donde se soltaron, que se mantiene al día con las ediciones
+   * @param {(files: File[], at: {pos: number}) => void} [o.onFilesDrop] archivos soltados o imágenes pegadas en el
+   *   editor (en vez de insertar su contenido); `at` es la posición donde se soltaron (o el cursor al pegar), que se
+   *   mantiene al día con las ediciones
    */
   constructor(o) {
     Object.assign(this, o)
@@ -84,6 +99,8 @@ export class CollabSession {
     this.forceInit = false
     this.cursorTimer = null
     this.tracked = new Set() // posiciones que se actualizan con cada cambio (track)
+    this.marginCol = savedMargin() // guía de margen derecho (0: sin guía)
+    this.marginConf = new Compartment()
     this.lastMsg = 0
     // Al volver a la pestaña, recuperar la red o el foco: reconectar ya en vez
     // de esperar al temporizador (Chrome lo retrasa en pestañas ocultas) y
@@ -105,7 +122,11 @@ export class CollabSession {
       basicSetup,
       keymap.of([indentWithTab]),
       // Atajos de formato por encima de los de basicSetup (p. ej. Mod-i, Mod-u).
-      Prec.high(keymap.of(formatKeymap({ image: () => this.onImage?.(), cite: () => this.onCite?.() }))),
+      // Solo lectura (invitado con enlace de lectura): sin atajos de formato y
+      // ningún cambio local; los remotos (receiveUpdates usa filter: false) sí llegan.
+      this.readOnly
+        ? [EditorState.readOnly.of(true), EditorState.changeFilter.of(() => false)]
+        : Prec.high(keymap.of(formatKeymap({ image: () => this.onImage?.(), cite: () => this.onCite?.() }))),
       this.imageHandlers ? [imageHover(this.imageHandlers), EditorView.theme(imageHoverTheme)] : [],
       this.tableHandlers && !this.isBib ? [tableHover(this.tableHandlers), EditorView.theme(tableHoverTheme)] : [],
       this.isBib ? bibLanguage : typstLanguage,
@@ -114,6 +135,7 @@ export class CollabSession {
       syntaxHighlighting(typstHighlight),
       EditorView.lineWrapping,
       editorTheme,
+      this.marginConf.of(marginGuide(this.marginCol)),
       remoteCursors,
       collab({ startVersion: version }),
       EditorView.domEventHandlers({
@@ -130,6 +152,18 @@ export class CollabSession {
           e.preventDefault()
           const pos = view.posAtCoords({ x: e.clientX, y: e.clientY }) ?? view.state.selection.main.head
           this.onFilesDrop(files, this.track(pos))
+          return true
+        },
+        // Imágenes pegadas (captura de pantalla, «Copiar imagen»): misma subida que al soltarlas,
+        // insertadas en el cursor. Si el portapapeles también trae texto (celdas de Excel, párrafos
+        // de Word, que además vienen como imagen) se pega el texto, como espera el usuario.
+        paste: (e, view) => {
+          if (!this.onFilesDrop) return false
+          const cd = e.clipboardData
+          const images = [...(cd?.files ?? [])].filter((f) => f.type.startsWith('image/'))
+          if (!images.length || cd.getData('text/plain').trim()) return false
+          e.preventDefault()
+          this.onFilesDrop(images.map(pastedName), this.track(view.state.selection.main.head))
           return true
         },
         mouseup: (e, view) => {
@@ -293,6 +327,7 @@ export class CollabSession {
   }
 
   push() {
+    if (this.readOnly) return
     if (!this.view || this.inflight || this.ws?.readyState !== WebSocket.OPEN) return
     const updates = sendableUpdates(this.view.state)
     if (!updates.length) return
@@ -400,6 +435,12 @@ export class CollabSession {
     })
     this.view.focus()
     return true
+  }
+
+  // Cambia la columna de la guía de margen (0: quitarla).
+  setMargin(col) {
+    this.marginCol = col
+    this.view?.dispatch({ effects: this.marginConf.reconfigure(marginGuide(col)) })
   }
 
   goto(line, column = 1) {

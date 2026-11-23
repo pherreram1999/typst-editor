@@ -2,9 +2,11 @@ package httpapi
 
 import (
 	"compress/gzip"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -19,6 +21,7 @@ import (
 	"unicode/utf8"
 
 	"typsteditor/backend/internal/collab"
+	"typsteditor/backend/internal/database"
 	"typsteditor/backend/internal/gitsync"
 	"typsteditor/backend/internal/imgopt"
 	"typsteditor/backend/internal/typst"
@@ -54,7 +57,9 @@ type Project struct {
 	memberList  sql.NullString
 	FolderID    *int64 `json:"folder_id"`
 	Members     int    `json:"members"`
-	gitToken    string
+	// ReadOnly: invitado con un enlace de solo lectura (Access "guest").
+	ReadOnly bool `json:"read_only,omitempty"`
+	gitToken string
 }
 
 type FileEntry struct {
@@ -65,20 +70,21 @@ type FileEntry struct {
 
 const maxUpload = 20 << 20
 
-// projectSelect calcula además el acceso del usuario actual y une la cuenta de
+// projectSelectTmpl (Server.projectSelect, construido por buildProjectSelect
+// según el dialecto) calcula además el acceso del usuario actual y une la cuenta de
 // GitHub del proyecto. Sus parámetros son selectArgs(u) y después los de la
 // condición (todos los ? de projectSelect son el ID del usuario: selectArgs).
 // projectAccess limita a los proyectos propios, a los compartidos
 // con el usuario y, para admin, a todos (parámetros: userID, rol).
 const (
-	projectSelect = `SELECT p.id, p.name, p.main_file, p.owner_id, u.name, p.git_remote, p.git_branch,
+	projectSelectTmpl = `SELECT p.id, p.name, p.main_file, p.owner_id, u.name, p.git_remote, p.git_branch,
   p.is_template, p.template_category, p.template_description,
   p.github_account_id, COALESCE(ga.login, ''), COALESCE(ga.token, ''), COALESCE(ga.user_id = ?, FALSE),
   p.created_at, p.updated_at,
   CASE WHEN p.owner_id = ? THEN 'owner' WHEN m.user_id IS NOT NULL THEN 'member' ELSE 'admin' END,
   (SELECT COUNT(*) FROM project_members pm WHERE pm.project_id = p.id),
   COALESCE(pr.starred, 0), pr.folder_id,
-  (SELECT GROUP_CONCAT(u2.name ORDER BY u2.name SEPARATOR '\n')
+  (SELECT %s
    FROM project_members pm2 JOIN users u2 ON u2.id = pm2.user_id WHERE pm2.project_id = p.id)
 FROM projects p
 JOIN users u ON u.id = p.owner_id
@@ -98,9 +104,15 @@ var textExts = map[string]bool{
 
 func isEditable(p string) bool { return textExts[strings.ToLower(path.Ext(p))] }
 
+// buildProjectSelect completa projectSelectTmpl con la lista de miembros
+// (separados por salto de línea; scanProject los ordena).
+func buildProjectSelect(d database.Dialect) string {
+	return fmt.Sprintf(projectSelectTmpl, d.GroupConcat("u2.name", "\n"))
+}
+
 // selectArgs devuelve los parámetros de projectSelect seguidos de extra.
 func selectArgs(u *User, extra ...any) []any {
-	n := strings.Count(projectSelect, "?")
+	n := strings.Count(projectSelectTmpl, "?")
 	args := make([]any, 0, n+len(extra))
 	for i := 0; i < n; i++ {
 		args = append(args, u.ID)
@@ -117,6 +129,7 @@ func scanProject(row interface{ Scan(...any) error }) (*Project, error) {
 	p.MemberNames = []string{}
 	if p.memberList.Valid && p.memberList.String != "" {
 		p.MemberNames = strings.Split(p.memberList.String, "\n")
+		sort.Strings(p.MemberNames)
 	}
 	p.HasToken = p.gitToken != ""
 	return p, err
@@ -170,13 +183,14 @@ func (s *Server) regularFile(id int64, rel string) (string, fs.FileInfo, error) 
 }
 
 // projectByID carga un proyecto si el usuario tiene acceso (sql.ErrNoRows si no).
-func (s *Server) projectByID(r *http.Request, u *User, id int64) (*Project, error) {
-	return scanProject(s.db.QueryRowContext(r.Context(),
-		projectSelect+` WHERE p.id = ? AND `+projectAccess, selectArgs(u, id, u.ID, u.Role)...))
+func (s *Server) projectByID(ctx context.Context, u *User, id int64) (*Project, error) {
+	return scanProject(s.db.QueryRowContext(ctx,
+		s.projectSelect+` WHERE p.id = ? AND `+projectAccess, selectArgs(u, id, u.ID, u.Role)...))
 }
 
 // loadProject carga el proyecto de la ruta comprobando que el usuario actual
-// es propietario, miembro o administrador. Sin acceso responde 404 para no
+// es propietario, miembro o administrador (un invitado, solo el proyecto de su
+// enlace: guestProject). Sin acceso responde 404 para no
 // revelar qué proyectos existen.
 func (s *Server) loadProject(w http.ResponseWriter, r *http.Request) (*Project, bool) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
@@ -184,13 +198,18 @@ func (s *Server) loadProject(w http.ResponseWriter, r *http.Request) (*Project, 
 		writeError(w, http.StatusBadRequest, "id inválido")
 		return nil, false
 	}
-	p, err := s.projectByID(r, currentUser(r), id)
+	var p *Project
+	if g := currentGuest(r); g != nil {
+		p, err = s.guestProject(r.Context(), g, id)
+	} else {
+		p, err = s.projectByID(r.Context(), currentUser(r), id)
+	}
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "proyecto no encontrado")
 		return nil, false
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "error interno")
+		internalError(w, err)
 		return nil, false
 	}
 	return p, true
@@ -202,7 +221,26 @@ func longRequest(w http.ResponseWriter, d time.Duration) {
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(d))
 }
 
+// isOwner: pull y push quedan reservados al propietario (ni miembros ni admins),
+// porque usan las credenciales de GitHub del proyecto y deciden qué se publica.
+func isOwner(u *User, p *Project) bool { return u.ID == p.OwnerID }
+
+// requireOwner responde 403 si el usuario actual no es el propietario.
+func requireOwner(w http.ResponseWriter, r *http.Request, p *Project) bool {
+	if isOwner(currentUser(r), p) {
+		return true
+	}
+	writeError(w, http.StatusForbidden, "solo el propietario del proyecto puede hacer pull y push")
+	return false
+}
+
 func gitError(w http.ResponseWriter, err error) {
+	// Pull con conflictos: 409 con las tres versiones de cada archivo para el editor de fusión.
+	var ce *gitsync.ConflictError
+	if errors.As(err, &ce) {
+		writeJSON(w, http.StatusConflict, map[string]any{"error": ce.Error(), "conflict": ce})
+		return
+	}
 	var ue *gitsync.UserError
 	if errors.As(err, &ue) {
 		writeError(w, http.StatusBadRequest, ue.Msg)
@@ -224,9 +262,9 @@ func (s *Server) remote(p *Project) *gitsync.Remote {
 func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 	u := currentUser(r)
 	rows, err := s.db.QueryContext(r.Context(),
-		projectSelect+` WHERE `+projectAccess+projectOrder, selectArgs(u, u.ID, u.Role)...)
+		s.projectSelect+` WHERE `+projectAccess+projectOrder, selectArgs(u, u.ID, u.Role)...)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "error interno")
+		internalError(w, err)
 		return
 	}
 	defer rows.Close()
@@ -234,7 +272,7 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		p, err := scanProject(rows)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "error interno")
+			internalError(w, err)
 			return
 		}
 		out = append(out, p)
@@ -310,7 +348,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		`INSERT INTO projects (name, owner_id, github_account_id, git_remote, git_branch) VALUES (?, ?, ?, ?, ?)`,
 		in.Name, u.ID, in.GitHubAccountID, in.GitRemote, in.GitBranch)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "error interno")
+		internalError(w, err)
 		return
 	}
 	id, _ := res.LastInsertId()
@@ -367,9 +405,9 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	p, err := s.projectByID(r, u, id)
+	p, err := s.projectByID(r.Context(), u, id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "error interno")
+		internalError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, p)
@@ -472,13 +510,13 @@ func (s *Server) updateProject(w http.ResponseWriter, r *http.Request) {
 		 is_template=?, template_category=?, template_description=? WHERE id=?`,
 		p.Name, p.MainFile, p.GitRemote, p.GitBranch, p.GitHubAccountID,
 		p.IsTemplate, p.TemplateCategory, p.TemplateDescription, p.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, "error interno")
+		internalError(w, err)
 		return
 	}
 	s.hub.BumpRev(p.ID, true)
-	p, err := s.projectByID(r, currentUser(r), p.ID)
+	p, err := s.projectByID(r.Context(), currentUser(r), p.ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "error interno")
+		internalError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, p)
@@ -497,7 +535,7 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
 	mu.Lock()
 	defer mu.Unlock()
 	if _, err := s.db.ExecContext(r.Context(), `DELETE FROM projects WHERE id=?`, p.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, "error interno")
+		internalError(w, err)
 		return
 	}
 	s.hub.CloseProject(p.ID, "el proyecto se ha eliminado")
@@ -515,7 +553,17 @@ func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	root := s.projectDir(p.ID)
+	out, err := s.projectFiles(p.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "no se pudo leer el proyecto")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"files": out, "rev": s.hub.Rev(p.ID)})
+}
+
+// projectFiles lista los archivos regulares del proyecto (sin ocultos), ordenados.
+func (s *Server) projectFiles(id int64) ([]FileEntry, error) {
+	root := s.projectDir(id)
 	out := []FileEntry{}
 	err := filepath.WalkDir(root, func(abs string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -542,17 +590,16 @@ func (s *Server) listFiles(w http.ResponseWriter, r *http.Request) {
 		out = append(out, FileEntry{Path: rel, Size: fi.Size(), Editable: isEditable(rel)})
 		return nil
 	})
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "no se pudo leer el proyecto")
-		return
-	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
-	writeJSON(w, http.StatusOK, map[string]any{"files": out, "rev": s.hub.Rev(p.ID)})
+	return out, err
 }
 
 func (s *Server) createFile(w http.ResponseWriter, r *http.Request) {
 	p, ok := s.loadProject(w, r)
 	if !ok {
+		return
+	}
+	if !requireWrite(w, r) {
 		return
 	}
 	var in struct {
@@ -595,6 +642,9 @@ func (s *Server) uploadFile(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !requireWrite(w, r) {
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxUpload+1<<20)
 	file, hdr, err := r.FormFile("file")
 	if err != nil {
@@ -616,36 +666,50 @@ func (s *Server) uploadFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	abs := filepath.Join(s.projectDir(p.ID), filepath.FromSlash(rel))
-	if replace != "" {
-		if _, _, err := s.regularFile(p.ID, rel); err != nil {
-			writeError(w, http.StatusNotFound, "el archivo a reemplazar no existe")
-			return
-		}
-	}
-	if fi, err := os.Lstat(abs); err == nil && !fi.Mode().IsRegular() {
-		writeError(w, http.StatusBadRequest, "ya existe una entrada con ese nombre")
-		return
-	}
-	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-		writeError(w, http.StatusBadRequest, "no se pudo crear la carpeta")
-		return
-	}
 	data, err := io.ReadAll(io.LimitReader(file, maxUpload+1))
 	if err != nil || len(data) > maxUpload {
 		writeError(w, http.StatusBadRequest, "archivo demasiado grande (máx. 20 MB)")
 		return
 	}
-	var opt *imgopt.Result
-	if r.FormValue("optimize") == "1" && isImage(rel) {
+	optimize := r.FormValue("optimize") == "1" && isImage(rel)
+	if optimize {
 		longRequest(w, 3*time.Minute)
+	}
+	res, err := s.storeFile(p, rel, data, optimize, replace != "")
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, res)
+}
+
+// storeFile guarda un archivo subido (nuevo o reemplazando otro; con
+// mustExist, solo reemplazando). Si es de texto y está abierto en el editor,
+// el contenido nuevo llega a los clientes como un cambio remoto.
+func (s *Server) storeFile(p *Project, rel string, data []byte, optimize, mustExist bool) (*uploadResult, error) {
+	abs := filepath.Join(s.projectDir(p.ID), filepath.FromSlash(rel))
+	if mustExist {
+		if _, _, err := s.regularFile(p.ID, rel); err != nil {
+			return nil, errf(http.StatusNotFound, "el archivo a reemplazar no existe")
+		}
+	}
+	if fi, err := os.Lstat(abs); err == nil && !fi.Mode().IsRegular() {
+		return nil, errf(http.StatusBadRequest, "ya existe una entrada con ese nombre")
+	}
+	if len(data) > maxUpload {
+		return nil, errf(http.StatusBadRequest, "archivo demasiado grande (máx. 20 MB)")
+	}
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		return nil, errf(http.StatusBadRequest, "no se pudo crear la carpeta")
+	}
+	var opt *imgopt.Result
+	if optimize && isImage(rel) {
 		var res imgopt.Result
 		data, res = imgopt.Optimize(data)
 		opt = &res
 	}
 	if err := os.WriteFile(abs, data, 0o644); err != nil {
-		writeError(w, http.StatusInternalServerError, "no se pudo guardar el archivo")
-		return
+		return nil, errf(http.StatusInternalServerError, "no se pudo guardar el archivo")
 	}
 	// Si el archivo estaba abierto en el editor, se propaga como cambio remoto.
 	if isEditable(rel) {
@@ -654,7 +718,7 @@ func (s *Server) uploadFile(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.hub.BumpRev(p.ID, true)
-	writeJSON(w, http.StatusCreated, uploadResult{FileEntry{Path: rel, Size: int64(len(data)), Editable: isEditable(rel)}, opt})
+	return &uploadResult{FileEntry{Path: rel, Size: int64(len(data)), Editable: isEditable(rel)}, opt}, nil
 }
 
 type uploadResult struct {
@@ -675,6 +739,9 @@ func isImage(rel string) bool {
 func (s *Server) optimizeImage(w http.ResponseWriter, r *http.Request) {
 	p, ok := s.loadProject(w, r)
 	if !ok {
+		return
+	}
+	if !requireWrite(w, r) {
 		return
 	}
 	var in struct {
@@ -770,34 +837,47 @@ func (s *Server) deleteFile(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !requireWrite(w, r) {
+		return
+	}
 	rel, err := cleanPath(r.URL.Query().Get("path"))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if rel == p.MainFile {
-		writeError(w, http.StatusBadRequest, "no se puede borrar el archivo principal")
+	if err := s.removeFile(p, rel); err != nil {
+		writeAPIError(w, err)
 		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// removeFile borra un archivo (no el principal) y las carpetas que queden vacías.
+func (s *Server) removeFile(p *Project, rel string) error {
+	if rel == p.MainFile {
+		return errf(http.StatusBadRequest, "no se puede borrar el archivo principal")
 	}
 	abs, _, err := s.regularFile(p.ID, rel)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "archivo no encontrado")
-		return
+		return errf(http.StatusNotFound, "archivo no encontrado")
 	}
 	s.hub.CloseDoc(p.ID, rel, "el archivo se ha eliminado")
 	if err := os.Remove(abs); err != nil {
-		writeError(w, http.StatusInternalServerError, "no se pudo eliminar")
-		return
+		return errf(http.StatusInternalServerError, "no se pudo eliminar")
 	}
-	// Eliminar carpetas que hayan quedado vacías.
-	root := s.projectDir(p.ID)
-	for d := filepath.Dir(abs); d != root && strings.HasPrefix(d, root); d = filepath.Dir(d) {
+	s.pruneEmptyDirs(p.ID, filepath.Dir(abs))
+	s.hub.BumpRev(p.ID, true)
+	return nil
+}
+
+// pruneEmptyDirs elimina dir y sus padres mientras estén vacíos (sin llegar a la raíz).
+func (s *Server) pruneEmptyDirs(id int64, dir string) {
+	root := s.projectDir(id)
+	for d := dir; d != root && strings.HasPrefix(d, root); d = filepath.Dir(d) {
 		if os.Remove(d) != nil {
 			break
 		}
 	}
-	s.hub.BumpRev(p.ID, true)
-	w.WriteHeader(http.StatusNoContent)
 }
 
 // ---------- compilación ----------
@@ -811,6 +891,7 @@ type compileCache struct {
 	prevPages  []typst.Page   // y de la anterior (aún se pueden pedir)
 	pdfRev     int64
 	pdfValid   bool
+	pdfDiags   []typst.Diagnostic // advertencias de la compilación guardada
 	thumbRev   int64
 	thumbValid bool
 	// Mapa de sincronización vista previa ↔ código (su propio mutex: no
@@ -918,6 +999,16 @@ func (s *Server) previewSync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	longRequest(w, 5*time.Minute)
+	pts, rev, err := s.syncPoints(r.Context(), p)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"rev": rev, "points": pts})
+}
+
+// syncPoints devuelve el mapa vista previa ↔ código de la revisión actual (en caché).
+func (s *Server) syncPoints(ctx context.Context, p *Project) ([]typst.SyncPoint, int64, error) {
 	c := s.cacheFor(p.ID)
 	c.syncMu.Lock()
 	defer c.syncMu.Unlock()
@@ -926,23 +1017,21 @@ func (s *Server) previewSync(w http.ResponseWriter, r *http.Request) {
 		mu := s.projectLock(p.ID)
 		mu.Lock()
 		s.hub.FlushProject(p.ID)
-		pts, err := s.typst.SyncMap(r.Context(), s.projectDir(p.ID), p.MainFile, s.buildDir(p.ID))
+		pts, err := s.typst.SyncMap(ctx, s.projectDir(p.ID), p.MainFile, s.buildDir(p.ID))
 		mu.Unlock()
 		var ce *typst.CompileError
 		if errors.As(err, &ce) {
-			writeError(w, http.StatusUnprocessableEntity, "el documento no compila")
-			return
+			return nil, rev, errf(http.StatusUnprocessableEntity, "el documento no compila")
 		}
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "no se pudo ejecutar typst: "+err.Error())
-			return
+			return nil, rev, errf(http.StatusInternalServerError, "no se pudo ejecutar typst: "+err.Error())
 		}
 		if pts == nil {
 			pts = []typst.SyncPoint{}
 		}
 		c.sync, c.syncRev, c.syncValid = pts, rev, true
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"rev": rev, "points": c.sync})
+	return c.sync, rev, nil
 }
 
 func (s *Server) pdf(w http.ResponseWriter, r *http.Request) {
@@ -951,32 +1040,22 @@ func (s *Server) pdf(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	longRequest(w, 2*time.Minute)
+	// El PDF se lee con el candado de la caché: otra compilación no lo cambia a medias.
 	c := s.cacheFor(p.ID)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	rev := s.hub.Rev(p.ID)
-	file := filepath.Join(s.buildDir(p.ID), "document.pdf")
-	if !(c.pdfValid && c.pdfRev == rev) {
-		mu := s.projectLock(p.ID)
-		mu.Lock()
-		s.hub.FlushProject(p.ID)
-		_, diags, err := s.typst.PDF(r.Context(), s.projectDir(p.ID), p.MainFile, s.buildDir(p.ID))
-		mu.Unlock()
-		var ce *typst.CompileError
-		if errors.As(err, &ce) {
-			if diags == nil {
-				diags = []typst.Diagnostic{}
-			}
-			writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": ce.Output, "diagnostics": diags})
-			return
-		}
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "no se pudo ejecutar typst: "+err.Error())
-			return
-		}
-		c.pdfRev, c.pdfValid = rev, true
+	res, err := s.compilePDFLocked(r.Context(), p, c)
+	var ce *typst.CompileError
+	if errors.As(err, &ce) {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": ce.Output, "diagnostics": res.Diagnostics})
+		return
 	}
-	f, err := os.Open(file)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	rev := res.Rev
+	f, err := os.Open(res.File)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "PDF no disponible")
 		return
@@ -989,11 +1068,48 @@ func (s *Server) pdf(w http.ResponseWriter, r *http.Request) {
 	http.ServeContent(w, r, name, time.Time{}, f)
 }
 
+// pdfResult es el resultado de compilar el PDF de un proyecto.
+type pdfResult struct {
+	Rev         int64
+	File        string
+	Diagnostics []typst.Diagnostic // de la última compilación (vacío si venía de caché)
+	Cached      bool
+}
+
+// compilePDFLocked compila el PDF si la revisión cambió (con c.mu tomado).
+// Si el documento no compila devuelve *typst.CompileError con los diagnósticos.
+func (s *Server) compilePDFLocked(ctx context.Context, p *Project, c *compileCache) (*pdfResult, error) {
+	rev := s.hub.Rev(p.ID)
+	res := &pdfResult{Rev: rev, File: filepath.Join(s.buildDir(p.ID), "document.pdf"), Diagnostics: []typst.Diagnostic{}}
+	if c.pdfValid && c.pdfRev == rev {
+		res.Cached = true
+		res.Diagnostics = c.pdfDiags
+		return res, nil
+	}
+	mu := s.projectLock(p.ID)
+	mu.Lock()
+	s.hub.FlushProject(p.ID)
+	_, diags, err := s.typst.PDF(ctx, s.projectDir(p.ID), p.MainFile, s.buildDir(p.ID))
+	mu.Unlock()
+	if diags != nil {
+		res.Diagnostics = diags
+	}
+	var ce *typst.CompileError
+	if errors.As(err, &ce) {
+		return res, err
+	}
+	if err != nil {
+		return res, errf(http.StatusInternalServerError, "no se pudo ejecutar typst: "+err.Error())
+	}
+	c.pdfRev, c.pdfValid, c.pdfDiags = rev, true, res.Diagnostics
+	return res, nil
+}
+
 // ---------- git ----------
 
 func (s *Server) gitStatus(w http.ResponseWriter, r *http.Request) {
 	p, ok := s.loadProject(w, r)
-	if !ok {
+	if !ok || !requireOwner(w, r, p) {
 		return
 	}
 	mu := s.projectLock(p.ID)
@@ -1010,7 +1126,7 @@ func (s *Server) gitStatus(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) gitPull(w http.ResponseWriter, r *http.Request) {
 	p, ok := s.loadProject(w, r)
-	if !ok {
+	if !ok || !requireOwner(w, r, p) {
 		return
 	}
 	longRequest(w, 3*time.Minute)
@@ -1024,7 +1140,46 @@ func (s *Server) gitPull(w http.ResponseWriter, r *http.Request) {
 		gitError(w, err)
 		return
 	}
-	// Propagar a los editores abiertos el nuevo contenido de cada archivo.
+	s.reloadOpenDocs(p)
+	writeJSON(w, http.StatusOK, map[string]string{"message": msg})
+}
+
+// gitResolve: POST /git/pull/resolve {theirs, files: [Resolution]} completa
+// un pull con conflictos con lo resuelto en el editor de fusión.
+func (s *Server) gitResolve(w http.ResponseWriter, r *http.Request) {
+	p, ok := s.loadProject(w, r)
+	if !ok || !requireOwner(w, r, p) {
+		return
+	}
+	var in struct {
+		Theirs string               `json:"theirs"`
+		Files  []gitsync.Resolution `json:"files"`
+	}
+	if err := decode(r, &in); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if len(in.Theirs) < 40 || len(in.Files) == 0 {
+		writeError(w, http.StatusBadRequest, "faltan las resoluciones de la fusión")
+		return
+	}
+	longRequest(w, 3*time.Minute)
+	mu := s.projectLock(p.ID)
+	mu.Lock()
+	defer mu.Unlock()
+	s.hub.FlushProject(p.ID)
+	msg, err := s.git.Resolve(r.Context(), s.projectDir(p.ID), s.author(currentUser(r)), in.Theirs, in.Files)
+	if err != nil {
+		gitError(w, err)
+		return
+	}
+	s.reloadOpenDocs(p)
+	writeJSON(w, http.StatusOK, map[string]string{"message": msg})
+}
+
+// reloadOpenDocs lleva a los editores abiertos el contenido del disco tras
+// un cambio externo (pull, fusión) y avisa de la nueva revisión.
+func (s *Server) reloadOpenDocs(p *Project) {
 	for _, rel := range s.hub.OpenPaths(p.ID) {
 		abs, _, err := s.regularFile(p.ID, rel)
 		if err != nil {
@@ -1036,12 +1191,11 @@ func (s *Server) gitPull(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.hub.BumpRev(p.ID, true)
-	writeJSON(w, http.StatusOK, map[string]string{"message": msg})
 }
 
 func (s *Server) gitPush(w http.ResponseWriter, r *http.Request) {
 	p, ok := s.loadProject(w, r)
-	if !ok {
+	if !ok || !requireOwner(w, r, p) {
 		return
 	}
 	var in struct {
@@ -1053,7 +1207,7 @@ func (s *Server) gitPush(w http.ResponseWriter, r *http.Request) {
 	}
 	in.Message = strings.TrimSpace(in.Message)
 	if in.Message == "" {
-		in.Message = "Actualización desde Typst Editor"
+		in.Message = "Actualización desde Typst Extend"
 	}
 	if len(in.Message) > 2000 {
 		writeError(w, http.StatusBadRequest, "mensaje de commit demasiado largo")

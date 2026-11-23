@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"io"
@@ -36,13 +37,13 @@ func (s *Server) projectForCopy(w http.ResponseWriter, r *http.Request) (*Projec
 	}
 	u := currentUser(r)
 	p, err := scanProject(s.db.QueryRowContext(r.Context(),
-		projectSelect+` WHERE p.id = ? AND (`+projectAccess+` OR p.is_template = 1)`, selectArgs(u, id, u.ID, u.Role)...))
+		s.projectSelect+` WHERE p.id = ? AND (`+projectAccess+` OR p.is_template = 1)`, selectArgs(u, id, u.ID, u.Role)...))
 	if errors.Is(err, sql.ErrNoRows) {
 		writeError(w, http.StatusNotFound, "proyecto no encontrado")
 		return nil, false
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "error interno")
+		internalError(w, err)
 		return nil, false
 	}
 	readOnlyAccess(u, p)
@@ -53,10 +54,10 @@ func (s *Server) projectForCopy(w http.ResponseWriter, r *http.Request) (*Projec
 func (s *Server) listTemplates(w http.ResponseWriter, r *http.Request) {
 	u := currentUser(r)
 	rows, err := s.db.QueryContext(r.Context(),
-		projectSelect+` WHERE p.is_template = 1 ORDER BY p.template_category = '', p.template_category, p.name`,
+		s.projectSelect+` WHERE p.is_template = 1 ORDER BY p.template_category = '', p.template_category, p.name`,
 		selectArgs(u)...)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "error interno")
+		internalError(w, err)
 		return
 	}
 	defer rows.Close()
@@ -64,7 +65,7 @@ func (s *Server) listTemplates(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		p, err := scanProject(rows)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "error interno")
+			internalError(w, err)
 			return
 		}
 		readOnlyAccess(u, p)
@@ -140,21 +141,28 @@ func (s *Server) cloneProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "nombre demasiado largo (máx. 128)")
 		return
 	}
-	u := currentUser(r)
 	longRequest(w, 2*time.Minute)
+	p, err := s.cloneFrom(r.Context(), currentUser(r), src, name)
+	if err != nil {
+		writeAPIError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, p)
+}
 
-	res, err := s.db.ExecContext(r.Context(),
+// cloneFrom crea un proyecto del usuario con una copia de los archivos de src.
+func (s *Server) cloneFrom(ctx context.Context, u *User, src *Project, name string) (*Project, error) {
+	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO projects (name, owner_id, main_file, git_branch) VALUES (?, ?, ?, 'main')`, name, u.ID, src.MainFile)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "error interno")
-		return
+		return nil, internalErr(err)
 	}
 	id, _ := res.LastInsertId()
 	dir := s.projectDir(id)
-	fail := func(msg string) {
+	fail := func(msg string) error {
 		_ = os.RemoveAll(dir)
-		_, _ = s.db.ExecContext(r.Context(), `DELETE FROM projects WHERE id = ?`, id)
-		writeError(w, http.StatusInternalServerError, msg)
+		_, _ = s.db.ExecContext(context.WithoutCancel(ctx), `DELETE FROM projects WHERE id = ?`, id)
+		return errf(http.StatusInternalServerError, msg)
 	}
 
 	// Copiar con los documentos abiertos guardados y sin operaciones git en curso.
@@ -164,19 +172,47 @@ func (s *Server) cloneProject(w http.ResponseWriter, r *http.Request) {
 	err = copyTree(s.projectDir(src.ID), dir)
 	mu.Unlock()
 	if err != nil {
-		fail("no se pudieron copiar los archivos")
-		return
+		return nil, fail("no se pudieron copiar los archivos")
 	}
-	if err := s.git.Init(r.Context(), dir, "main"); err != nil {
-		fail("git init: " + err.Error())
-		return
+	if err := s.git.Init(ctx, dir, "main"); err != nil {
+		return nil, fail("git init: " + err.Error())
 	}
-	p, err := s.projectByID(r, u, id)
+	p, err := s.projectByID(ctx, u, id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "error interno")
-		return
+		return nil, internalErr(err)
 	}
-	writeJSON(w, http.StatusCreated, p)
+	return p, nil
+}
+
+// newBlankProject crea un proyecto vacío del usuario con la plantilla por
+// defecto (main.typ) y un repositorio git propio, sin remoto.
+func (s *Server) newBlankProject(ctx context.Context, u *User, name string) (*Project, error) {
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO projects (name, owner_id, git_branch) VALUES (?, ?, 'main')`, name, u.ID)
+	if err != nil {
+		return nil, internalErr(err)
+	}
+	id, _ := res.LastInsertId()
+	dir := s.projectDir(id)
+	fail := func(msg string) error {
+		_ = os.RemoveAll(dir)
+		_, _ = s.db.ExecContext(context.WithoutCancel(ctx), `DELETE FROM projects WHERE id = ?`, id)
+		return errf(http.StatusInternalServerError, msg)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fail("no se pudo crear el directorio del proyecto")
+	}
+	if err := s.git.Init(ctx, dir, "main"); err != nil {
+		return nil, fail("git init: " + err.Error())
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.typ"), []byte(projectTemplate(name)), 0o644); err != nil {
+		return nil, fail("no se pudo crear main.typ")
+	}
+	p, err := s.projectByID(ctx, u, id)
+	if err != nil {
+		return nil, internalErr(err)
+	}
+	return p, nil
 }
 
 // thumbnail devuelve la primera página del documento como PNG (para la galería).

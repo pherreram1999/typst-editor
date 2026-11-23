@@ -1,14 +1,17 @@
 <script>
-  import { onMount, onDestroy } from 'svelte'
+  import { onMount, onDestroy, flushSync } from 'svelte'
   import { fly } from 'svelte/transition'
   import { api } from '../lib/api.js'
   import { session } from '../lib/session.svelte.js'
   import { d } from '../lib/motion.js'
   import Modal from '../lib/Modal.svelte'
   import Drawer from '../lib/Drawer.svelte'
+  import Sheet from '../lib/Sheet.svelte'
+  import { downloadPdf, downloadZip, sharePdf, canSharePdf, pdfError } from '../lib/workspace/exporting.js'
   import { CollabSession } from '../lib/editor/collab-client.js'
   import { relativePath, figureLabel, mediaSnippet, resolvePath, escapeString } from '../lib/editor/snippets.js'
   import EditorToolbar from '../lib/editor/EditorToolbar.svelte'
+  import { savedMargin, saveMargin } from '../lib/editor/marginGuide.js'
   import * as cmd from '../lib/editor/commands.js'
   import Preview from '../lib/workspace/Preview.svelte'
   import PdfView from '../lib/workspace/PdfView.svelte'
@@ -17,7 +20,9 @@
   import FileTree from '../lib/workspace/FileTree.svelte'
   import OptimizeModal from '../lib/workspace/OptimizeModal.svelte'
   import ImageModal from '../lib/workspace/ImageModal.svelte'
+  import ImageLightbox from '../lib/workspace/ImageLightbox.svelte'
   import TableModal from '../lib/workspace/TableModal.svelte'
+  import ConflictsDialog from '../lib/git/ConflictsDialog.svelte'
   import { tableAt } from '../lib/editor/tablecode.js'
   import { imageURL } from '../lib/workspace/imageCache.js'
   import RepoPicker from '../lib/RepoPicker.svelte'
@@ -40,7 +45,6 @@
   let liveVersion = $state(0)
   let remoteKey = $state(0)
   let tab = $state('preview') // preview | pdf
-  let pane = $state('editor') // en pantallas pequeñas: editor | output
   let showFiles = $state(true)
   let preview = $state() // componente de la vista previa (reveal)
   let compileResult = $state(null) // última compilación de la vista previa (diagnósticos)
@@ -51,7 +55,34 @@
   let wide = $state(lgQuery.matches)
   const onLg = (e) => (wide = e.matches)
   lgQuery.addEventListener('change', onLg)
+  // Pantallas pequeñas (celular, tableta vertical): como Google Docs, el
+  // proyecto se abre en modo lectura (la vista previa) y el lápiz pasa a
+  // editar; los menús son hojas inferiores.
+  const mobile = $derived(!wide)
+  let pane = $state(lgQuery.matches ? 'editor' : 'output') // en pantallas pequeñas: editor | output
   const outputVisible = $derived(wide || pane === 'output')
+  // En un celular (pantalla táctil y estrecha) la vista previa compila en el
+  // servidor: el compilador del navegador pesa ~11 MB y puede usar >1 GB.
+  const browserCompile = !(matchMedia('(pointer: coarse)').matches && !lgQuery.matches)
+  // Zona visible real: con el teclado abierto es más baja que la ventana (y
+  // en iOS además se desplaza); el editor se ajusta a ella para que la barra
+  // de formato quede justo encima del teclado.
+  let vv = $state({ top: 0, height: window.innerHeight })
+  $effect(() => {
+    const v = window.visualViewport
+    if (!mobile || !v) return
+    const upd = () => (vv = { top: v.offsetTop, height: v.height })
+    upd()
+    v.addEventListener('resize', upd)
+    v.addEventListener('scroll', upd)
+    return () => {
+      v.removeEventListener('resize', upd)
+      v.removeEventListener('scroll', upd)
+    }
+  })
+  let menuOpen = $state(false) // hojas inferiores del celular
+  let filesOpen = $state(false)
+  let problemsOpen = $state(false)
   let host = $state()
   let collab = null
   let live = $state.raw(null) // la misma sesión, reactiva (editor visual de .bib)
@@ -98,6 +129,7 @@
       projectId: id,
       path,
       parent: host,
+      readOnly: project?.read_only,
       onState: (st) => (fmt = cmd.activeFormats(st)),
       onDocChange: () => liveVersion++,
       onImage: () => insertImage(),
@@ -105,7 +137,7 @@
       // «@» en el código: claves de la bibliografía, las más recientes primero.
       completeCite: citeCompletion(() => libraryItems()),
       // Tarjeta sobre image("…"): miniatura y acciones para cambiarla.
-      imageHandlers: {
+      imageHandlers: project?.read_only ? null : {
         resolve: (rel) => {
           const p = resolvePath(path, rel)
           const f = files.find((x) => x.path === p)
@@ -118,10 +150,10 @@
         },
       },
       // Tarjeta sobre #table(…): abrir el editor visual de tablas.
-      tableHandlers: { onEdit: ({ from, to }) => editTable(s, from, to) },
+      tableHandlers: project?.read_only ? null : { onEdit: ({ from, to }) => editTable(s, from, to) },
       // Clic en el código: llevar la vista previa a ese punto.
       // Archivos soltados en el código: se pregunta la carpeta.
-      onFilesDrop: (list, at) => {
+      onFilesDrop: project?.read_only ? null : (list, at) => {
         editorDrag = 0
         if (!uploader) return s.untrack(at)
         uploader.addFiles(list, { folder: suggestFolder(list), insert: { path, at } })
@@ -132,7 +164,8 @@
       onStatus: (st, detail, revoked) => {
         if (st === 'closed' && revoked) {
           toast(detail || 'Ya no tienes acceso a este proyecto', 'error')
-          setTimeout(() => (location.hash = '#/'), 1500)
+          // Invitado: vuelve a la entrada del enlace (Invite.svelte), que lo explica.
+          setTimeout(() => (guest ? (session.user = null) : (location.hash = '#/')), 1500)
           return
         }
         status = st
@@ -191,6 +224,13 @@
 
   const current = $derived(files.find((f) => f.path === currentPath))
   const canManage = $derived(project && (session.user.role === 'admin' || session.user.id === project.owner_id))
+  // Invitado de un enlace (#/i/…): sin ajustes, miembros, GitHub ni .zip; con
+  // un enlace de solo lectura, además, sin editar, crear ni subir archivos.
+  const guest = session.user.role === 'guest'
+  const readOnly = $derived(!!project?.read_only)
+  // Pull y push: solo el propietario (usan las credenciales de GitHub del proyecto).
+  const canGit = $derived(project && session.user.id === project.owner_id)
+  const gitDenied = 'Solo el propietario del proyecto puede hacer pull y push'
   const pdfName = $derived((project?.main_file ?? 'documento.typ').split('/').pop().replace(/\.typ$/, '') + '.pdf')
 
   // ---------- bibliografía ----------
@@ -198,6 +238,8 @@
   let bibMode = $state(localStorage.getItem('typsteditor.bibmode') === 'code' ? 'code' : 'visual') // visual | code
   let bibFocus = $state('') // clave a mostrar al abrir el editor visual
   let bibEditor = $state()
+  // Editor visual del .bib (no en solo lectura: escribe en el documento).
+  const bibVisual = $derived(isBib && bibMode === 'visual' && !readOnly)
   function setBibMode(m) {
     bibMode = m
     try {
@@ -279,11 +321,19 @@
     return true
   }
 
+  // Imágenes que el navegador sabe mostrar: se abren en el visor (spotlight),
+  // recorriéndolas en el orden del explorador.
+  const isImage = (p) => /\.(png|jpe?g|gif|svg|webp|avif|bmp)$/i.test(p)
+  const imageFiles = $derived(files.filter((f) => isImage(f.path)).sort((a, b) => a.path.localeCompare(b.path)))
+  let lightbox = $state()
+
   function openFile(f) {
     if (f.editable) {
       currentPath = f.path
       pane = 'editor'
-    } else openRaw(f)
+      filesOpen = false
+    } else if (isImage(f.path)) lightbox?.open(f.path)
+    else openRaw(f)
   }
 
   async function openRaw(f) {
@@ -298,6 +348,7 @@
   }
 
   function onDiagnostic(dg) {
+    problemsOpen = false
     if (dg.file === currentPath) {
       collab?.goto(dg.line, dg.column)
       pane = 'editor'
@@ -333,6 +384,7 @@
   const uploadModal = import('../lib/workspace/UploadModal.svelte')
   let editorDrag = $state(0) // >0 mientras se arrastran archivos sobre el editor
   let fmt = $state({}) // formato bajo el cursor (barra de herramientas)
+  let marginCol = $state(savedMargin()) // guía de margen derecho del editor (0: sin guía)
 
   // ---------- imágenes: insertar (barra, Ctrl+Alt+I) o cambiar (tarjeta sobre image("…")) ----------
   let imageDialog = $state() // ImageModal
@@ -435,6 +487,10 @@
       case 'ref': return cmd.insertRef(v, arg)
       case 'cite': return openCite()
       case 'search': return cmd.runSearch(v)
+      case 'margin':
+        marginCol = arg
+        saveMargin(arg)
+        return s.setMargin(arg)
     }
   }
 
@@ -510,12 +566,63 @@
   }
 
 
+  // ---------- celular: lectura ↔ edición ----------
+  // Lápiz: editar en lo que se está leyendo. El foco se da en el mismo toque
+  // (si no, iOS no abre el teclado); la posición llega después.
+  function startEditing() {
+    pane = 'editor'
+    flushSync()
+    collab?.view?.focus()
+    preview?.sourceAtView().then((src) => {
+      if (!src || pane !== 'editor') return
+      if (src.file === currentPath) collab?.goto(src.line, src.column)
+      else if (files.some((f) => f.path === src.file && f.editable)) {
+        pendingGoto = src
+        currentPath = src.file
+      }
+    })
+  }
+  // ✓: volver a la lectura (se cierra el teclado) mostrando lo que se editaba.
+  function doneEditing() {
+    const v = collab?.view
+    const line = v ? v.state.doc.lineAt(v.state.selection.main.head).number : 0
+    v?.contentDOM.blur()
+    pane = 'output'
+    if (line) setTimeout(() => preview?.reveal(currentPath, line), 400)
+  }
+
+  let exporting = $state('') // '' | pdf | share | zip
+  async function runExport(kind) {
+    exporting = kind
+    try {
+      if (kind === 'pdf') await downloadPdf(project)
+      else if (kind === 'share') await sharePdf(project)
+      else {
+        await downloadZip(project)
+        toast('La descarga del proyecto comenzó')
+      }
+      menuOpen = false
+    } catch (e) {
+      toast(kind === 'zip' ? e.message : pdfError(e), 'error')
+    } finally {
+      exporting = ''
+    }
+  }
+  // Abrir algo desde el menú: primero se cierra la hoja.
+  function fromMenu(fn) {
+    menuOpen = false
+    fn()
+  }
+  const diagnostics = $derived(compileResult?.diagnostics ?? [])
+  const errorCount = $derived(compileResult && !compileResult.ok ? Math.max(1, diagnostics.filter((x) => x.severity === 'error').length) : 0)
+
   // ---------- git ----------
   let gitBusy = $state('') // '' | pull | push
   let pushOpen = $state(false)
   let pushMessage = $state('')
   let gitStatus = $state(null)
   let pushError = $state('')
+  let conflict = $state(null) // pull con conflictos pendiente de resolver (ConflictsDialog)
 
   async function pull() {
     if (!project.git_remote) {
@@ -528,9 +635,27 @@
       const r = await api.gitPull(id)
       toast(r.message)
     } catch (e) {
-      toast(e.message, 'error')
+      if (e.status === 409 && e.data?.conflict) conflict = e.data.conflict
+      else toast(e.message, 'error')
     } finally {
       gitBusy = ''
+    }
+  }
+
+  // Resoluciones del diálogo de conflictos: el servidor rehace la fusión y hace el commit.
+  async function resolveConflict(files) {
+    try {
+      const r = await api.gitResolve(id, conflict.theirs, files)
+      conflict = null
+      toast(r.message)
+    } catch (e) {
+      // Conflicto distinto (alguien editó mientras tanto): mostrar el nuevo.
+      if (e.status === 409 && e.data?.conflict) {
+        conflict = e.data.conflict
+        toast('Los archivos cambiaron mientras resolvías: revisa los conflictos de nuevo', 'error')
+        return
+      }
+      throw e
     }
   }
 
@@ -658,7 +783,64 @@
 {:else if !project}
   <p class="p-6 text-center text-sm text-slate-500">Cargando proyecto…</p>
 {:else}
-  <div class="flex h-[calc(100dvh-3.5rem)] flex-col">
+  <div
+    class="flex flex-col {mobile ? 'fixed inset-x-0 z-10 bg-surface' : 'h-[calc(100dvh-3.5rem)]'}"
+    style={mobile ? `top: ${vv.top}px; height: ${vv.height}px` : undefined}
+  >
+    {#if mobile}
+      <!-- Barra superior del celular: lectura (← título ⋮) o edición (✓ archivo ↶ ↷ ⋮) -->
+      <header class="flex h-14 shrink-0 items-center gap-0.5 border-b border-slate-200 bg-surface px-1" style="padding-top: env(safe-area-inset-top)">
+        {#if pane === 'editor'}
+          <button type="button" class="flex size-11 shrink-0 cursor-pointer items-center justify-center rounded-full text-slate-600 active:bg-slate-100 disabled:opacity-35 !text-primary" onclick={doneEditing} aria-label="Listo: volver a la vista previa" title="Listo">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5" /></svg>
+          </button>
+          <button
+            type="button"
+            class="flex h-11 min-w-0 flex-1 cursor-pointer items-center gap-1 rounded-lg px-1.5 text-left active:bg-slate-100"
+            onclick={() => (filesOpen = true)}
+            aria-label="Cambiar de archivo (abierto: {currentPath || 'ninguno'})"
+          >
+            <span class="size-2 shrink-0 rounded-full {statusColor[status]}" title={statusLabel[status]}></span>
+            <span class="truncate font-mono text-[13px] text-slate-800">{currentPath || 'Elegir archivo'}</span>
+            <svg class="shrink-0 text-slate-500" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
+          </button>
+          <button type="button" class="flex size-11 shrink-0 cursor-pointer items-center justify-center rounded-full text-slate-600 active:bg-slate-100 disabled:opacity-35" onclick={() => onTool('undo')} disabled={!fmt.canUndo} aria-label="Deshacer">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 14 4 9l5-5" /><path d="M4 9h11a5 5 0 0 1 0 10h-3" /></svg>
+          </button>
+          <button type="button" class="flex size-11 shrink-0 cursor-pointer items-center justify-center rounded-full text-slate-600 active:bg-slate-100 disabled:opacity-35" onclick={() => onTool('redo')} disabled={!fmt.canRedo} aria-label="Rehacer">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 14 5-5-5-5" /><path d="M20 9H9a5 5 0 0 0 0 10h3" /></svg>
+          </button>
+        {:else}
+          {#if !guest}
+          <a href="#/" class="flex size-11 shrink-0 cursor-pointer items-center justify-center rounded-full text-slate-600 active:bg-slate-100 disabled:opacity-35" aria-label="Volver a proyectos">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M12 19l-7-7 7-7" /></svg>
+          </a>
+          {:else}<span class="w-2 shrink-0"></span>{/if}
+          <div class="flex min-w-0 flex-1 flex-col px-1">
+            <h1 class="truncate text-base leading-tight font-semibold">{project.name}</h1>
+            <span class="flex items-center gap-1.5 text-xs text-slate-500">
+              <span class="size-1.5 rounded-full {statusColor[status]}"></span>{statusLabel[status]}
+            </span>
+          </div>
+          {#if people.length}
+            <div class="mr-1 flex -space-x-1.5" aria-label="Usuarios conectados">
+              {#each people.slice(0, 2) as p (p.user_id)}
+                <span class="flex size-7 items-center justify-center rounded-full text-[11px] font-semibold text-white ring-2 ring-surface" style="background-color: {p.color}" title={p.name}>{initials(p.name)}</span>
+              {/each}
+              {#if people.length > 2}<span class="flex size-7 items-center justify-center rounded-full bg-slate-200 text-[11px] font-semibold text-slate-700 ring-2 ring-surface">+{people.length - 2}</span>{/if}
+            </div>
+          {/if}
+          {#if !guest}
+          <button type="button" class="flex size-11 shrink-0 cursor-pointer items-center justify-center rounded-full text-slate-600 active:bg-slate-100 disabled:opacity-35" onclick={() => (shareOpen = true)} aria-label="Compartir">
+            <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M19 8v6M22 11h-6" /></svg>
+          </button>
+          {/if}
+        {/if}
+        <button type="button" class="flex size-11 shrink-0 cursor-pointer items-center justify-center rounded-full text-slate-600 active:bg-slate-100 disabled:opacity-35" onclick={() => (menuOpen = true)} aria-label="Más opciones: exportar, archivos, GitHub, ajustes">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="12" cy="5" r="1.8" /><circle cx="12" cy="12" r="1.8" /><circle cx="12" cy="19" r="1.8" /></svg>
+        </button>
+      </header>
+    {:else}
     <!-- Barra superior -->
     <header class="flex min-h-12 shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-b border-slate-200 bg-surface px-3 py-1.5">
       <div class="flex min-w-0 items-center gap-2">
@@ -671,9 +853,12 @@
         >
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 6h18M3 12h18M3 18h18" /></svg>
         </button>
-        <a href="#/" class="text-[13px] text-slate-500 no-underline hover:text-primary">Proyectos</a>
-        <span class="text-slate-300">/</span>
+        {#if !guest}
+          <a href="#/" class="text-[13px] text-slate-500 no-underline hover:text-primary">Proyectos</a>
+          <span class="text-slate-300">/</span>
+        {/if}
         <h1 class="truncate text-[15px] font-semibold">{project.name}</h1>
+        {#if readOnly}<span class="badge bg-amber-100 text-amber-800" title="Tu enlace de invitado no permite editar">Solo lectura</span>{/if}
         <span class="flex items-center gap-1.5 whitespace-nowrap text-xs text-slate-500" title={statusLabel[status]}>
           <span class="size-2 rounded-full {statusColor[status]}"></span>
           <span class="hidden sm:inline">{statusLabel[status]}</span>
@@ -691,16 +876,17 @@
             >
           {/each}
         </div>
+        {#if !guest}
         <div class="flex items-center gap-1.5">
           <button type="button" class="btn-secondary btn-sm" onclick={() => (shareOpen = true)} title="Invitar usuarios, ver quién tiene acceso y exportar en PDF o .zip">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M19 8v6M22 11h-6" /></svg>
             Compartir{#if project.members > 0}<span class="badge !bg-primary-soft !px-1.5 !py-0 text-primary">{project.members}</span>{/if}
           </button>
-          <button type="button" class="btn-secondary btn-sm" onclick={pull} disabled={!!gitBusy} title="Traer cambios del repositorio remoto">
+          <button type="button" class="btn-secondary btn-sm" onclick={pull} disabled={!!gitBusy || !canGit} title={canGit ? 'Traer cambios del repositorio remoto' : gitDenied}>
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v12M6 10l6 6 6-6M5 20h14" /></svg>
             {gitBusy === 'pull' ? 'Pull…' : 'Pull'}
           </button>
-          <button type="button" class="btn-primary btn-sm" onclick={openPush} disabled={!!gitBusy} title="Confirmar y enviar al repositorio remoto">
+          <button type="button" class="btn-primary btn-sm" onclick={openPush} disabled={!!gitBusy || !canGit} title={canGit ? 'Confirmar y enviar al repositorio remoto' : gitDenied}>
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20V8M6 14l6-6 6 6M5 4h14" /></svg>
             Push
           </button>
@@ -714,29 +900,18 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1Z" /></svg>
           </button>
         </div>
+        {/if}
       </div>
     </header>
-
-    <!-- Selector de panel en pantallas pequeñas -->
-    <div class="flex shrink-0 border-b border-slate-200 bg-surface lg:hidden" role="tablist">
-      {#each [['editor', 'Editor'], ['output', 'Vista previa / PDF']] as [k, label]}
-        <button
-          type="button"
-          role="tab"
-          aria-selected={pane === k}
-          class="flex-1 cursor-pointer border-b-2 py-2 text-[13px] font-medium {pane === k ? 'border-primary text-primary' : 'border-transparent text-slate-500'}"
-          onclick={() => (pane = k)}>{label}</button
-        >
-      {/each}
-    </div>
+    {/if}
 
     <div class="flex min-h-0 flex-1" bind:this={split}>
       <!-- Archivos -->
-      {#if showFiles}
-        <aside class="flex w-60 shrink-0 flex-col border-r border-slate-200 bg-slate-50 {pane === 'editor' ? '' : 'max-lg:hidden'}">
+      {#if showFiles && !mobile}
+        <aside class="flex w-60 shrink-0 flex-col border-r border-slate-200 bg-slate-50">
           <div class="flex items-center justify-between px-3 pt-3 pb-2">
             <span class="text-xs font-semibold tracking-wide text-slate-500 uppercase">Archivos</span>
-            <div class="flex gap-1">
+            <div class="flex gap-1 {readOnly ? 'hidden' : ''}">
               <button
                 type="button"
                 class="flex size-7 cursor-pointer items-center justify-center rounded-md text-slate-500 hover:bg-slate-200 hover:text-slate-900"
@@ -777,9 +952,9 @@
             mainFile={project.main_file}
             peopleIn={(path) => people.filter((p) => p.paths.includes(path) && p.user_id !== session.user.id)}
             onopen={openFile}
-            onremove={removeFile}
-            onreplace={(f) => uploader?.openReplace(f.path)}
-            ondropfiles={(list, folder) => uploader?.addFiles(list, { folder, autostart: true })}
+            onremove={readOnly ? null : removeFile}
+            onreplace={readOnly ? null : (f) => uploader?.openReplace(f.path)}
+            ondropfiles={readOnly ? null : (list, folder) => uploader?.addFiles(list, { folder, autostart: true })}
           />
         </aside>
       {/if}
@@ -787,7 +962,7 @@
       <!-- Editor -->
       <section
         class="relative flex min-w-0 flex-1 flex-col bg-surface {pane === 'editor' ? '' : 'max-lg:hidden'}"
-        ondragenter={(e) => dragHasFiles(e) && editorDrag++}
+        ondragenter={(e) => !readOnly && dragHasFiles(e) && editorDrag++}
         ondragleave={(e) => dragHasFiles(e) && (editorDrag = Math.max(0, editorDrag - 1))}
         role="presentation"
       >
@@ -799,7 +974,12 @@
             </div>
           </div>
         {/if}
-        {#if isBib}
+        {#if readOnly}
+          <div class="flex h-10 shrink-0 items-center gap-2 border-b border-slate-200 bg-surface px-3 max-lg:hidden">
+            <span class="min-w-0 flex-1 truncate font-mono text-xs text-slate-600" title={currentPath}>{currentPath}</span>
+            <span class="text-xs text-slate-500">Solo lectura</span>
+          </div>
+        {:else if isBib}
           <div class="flex h-10 shrink-0 items-center gap-2 border-b border-slate-200 bg-surface pr-2 pl-3">
             <span class="min-w-0 flex-1 truncate font-mono text-xs text-slate-600" title={currentPath}>{currentPath}</span>
             <div class="flex rounded-lg bg-slate-100 p-0.5" role="tablist" aria-label="Modo de edición de la bibliografía">
@@ -815,18 +995,19 @@
               {/each}
             </div>
           </div>
-        {:else}
+        {:else if !mobile}
           <EditorToolbar
             file={current && !current.editable ? `${currentPath} (no editable)` : currentPath}
             active={fmt}
+            margin={marginCol}
             disabled={!current?.editable || status !== 'online'}
             labels={() => cmd.labelsIn(collab?.text ?? '')}
             onaction={onTool}
           />
         {/if}
         <div class="relative min-h-0 flex-1">
-          <div bind:this={host} class="absolute inset-0 {isBib && bibMode === 'visual' ? 'invisible' : ''}"></div>
-          {#if isBib && bibMode === 'visual' && live}
+          <div bind:this={host} class="absolute inset-0 {bibVisual ? 'invisible' : ''}"></div>
+          {#if bibVisual && live}
             <div class="absolute inset-0 z-10">
               {#key live}
                 <BibEditor
@@ -846,6 +1027,10 @@
             <p class="absolute inset-0 flex items-center justify-center text-sm text-slate-500">Selecciona un archivo para editarlo.</p>
           {/if}
         </div>
+        {#if mobile && !isBib && current?.editable && !readOnly}
+          <!-- Barra de formato del celular: abajo, justo sobre el teclado. -->
+          <EditorToolbar compact active={fmt} disabled={status !== 'online'} labels={() => cmd.labelsIn(collab?.text ?? '')} onaction={onTool} />
+        {/if}
       </section>
 
       <!-- Divisor -->
@@ -859,10 +1044,10 @@
 
       <!-- Vista previa / PDF -->
       <section
-        class="flex min-w-0 flex-col max-lg:flex-1 {pane === 'output' ? '' : 'max-lg:hidden'}"
+        class="relative flex min-w-0 flex-col max-lg:flex-1 {pane === 'output' ? '' : 'max-lg:hidden'}"
         style="--w: {rightWidth}%"
       >
-        <div class="flex h-10 shrink-0 items-end gap-1 border-b border-slate-200 bg-slate-50 px-2" role="tablist">
+        <div class="flex h-10 shrink-0 items-end gap-1 border-b border-slate-200 bg-slate-50 px-2 max-lg:hidden" role="tablist">
           {#each [['preview', 'Vista previa'], ['pdf', 'PDF']] as [k, label]}
             <button
               type="button"
@@ -876,7 +1061,7 @@
           {/each}
         </div>
         <div class="min-h-0 flex-1">
-          <div class="h-full {tab === 'preview' ? '' : 'hidden'}">
+          <div class="h-full {tab === 'preview' || mobile ? '' : 'hidden'}">
             <Preview
               bind:this={preview}
               projectId={id}
@@ -885,19 +1070,53 @@
               livePath={currentPath}
               {liveVersion}
               liveText={() => (collab?.loaded ? collab.text : null)}
+              browser={browserCompile}
+              compact={mobile}
               active={outputVisible} onresult={(r) => (compileResult = r)} onjump={onDiagnostic} />
           </div>
-          <div class="h-full {tab === 'pdf' ? '' : 'hidden'}">
-            <PdfView projectId={id} {refreshKey} active={tab === 'pdf' && outputVisible} filename={pdfName} />
-          </div>
+          {#if !mobile}
+            <div class="h-full {tab === 'pdf' ? '' : 'hidden'}">
+              <PdfView projectId={id} {refreshKey} active={tab === 'pdf' && outputVisible} filename={pdfName} />
+            </div>
+          {/if}
         </div>
-        <ProblemsPanel result={compileResult} ondiagnostic={onDiagnostic} />
+        {#if mobile}
+          <!-- Lectura en el celular: aviso de errores y lápiz para editar. -->
+          <div class="pointer-events-none absolute inset-x-0 bottom-0 flex items-end justify-between gap-3 px-4" style="padding-bottom: calc(1.25rem + env(safe-area-inset-bottom))">
+            {#if errorCount || diagnostics.length}
+              <button
+                type="button"
+                class="pointer-events-auto flex h-10 cursor-pointer items-center gap-1.5 rounded-full border px-4 text-[13px] font-semibold shadow-md {errorCount
+                  ? 'border-red-200 bg-red-50 text-red-800'
+                  : 'border-amber-200 bg-amber-50 text-amber-800'}"
+                onclick={() => (problemsOpen = true)}
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M12 8v5M12 16h.01" /></svg>
+                {#if errorCount}{errorCount} {errorCount === 1 ? 'error' : 'errores'}{:else}{diagnostics.length} {diagnostics.length === 1 ? 'aviso' : 'avisos'}{/if}
+              </button>
+            {:else}
+              <span></span>
+            {/if}
+            <button
+              type="button"
+              class="pointer-events-auto flex size-15 cursor-pointer items-center justify-center rounded-2xl bg-primary text-white shadow-lg shadow-primary/30 active:bg-primary-hover disabled:opacity-50"
+              onclick={startEditing}
+              disabled={!current?.editable}
+              aria-label="Editar"
+              title="Editar"
+            >
+              <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9" /><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" /></svg>
+            </button>
+          </div>
+        {:else}
+          <ProblemsPanel result={compileResult} ondiagnostic={onDiagnostic} />
+        {/if}
       </section>
     </div>
   </div>
 
   <!-- Avisos -->
-  <div class="pointer-events-none fixed right-4 bottom-4 z-40 flex w-80 max-w-[calc(100vw-2rem)] flex-col gap-2" aria-live="polite">
+  <div class="pointer-events-none fixed right-4 bottom-4 z-40 flex max-lg:top-16 max-lg:bottom-auto w-80 max-w-[calc(100vw-2rem)] flex-col gap-2" aria-live="polite">
     {#each toasts as t (t.id)}
       <div
         class="pointer-events-auto rounded-lg border px-4 py-3 text-sm shadow-lg {t.kind === 'error'
@@ -925,6 +1144,12 @@
       }}
     />
   {/await}
+  <ImageLightbox
+    bind:this={lightbox}
+    projectId={id}
+    images={imageFiles}
+    oninsert={collab?.path?.endsWith('.typ') ? (path) => insertMedia({ items: [{ path }] }) : null}
+  />
   <ImageModal
     bind:this={imageDialog}
     projectId={id}
@@ -936,6 +1161,9 @@
       imageTarget = null
     }}
   />
+  {#if conflict}
+    <ConflictsDialog {conflict} onresolve={resolveConflict} onclose={() => (conflict = null)} />
+  {/if}
   <TableModal bind:this={tableDialog} onapply={applyTable} onclose={releaseTable} />
   <CiteModal
     bind:this={citeDialog}
@@ -955,6 +1183,148 @@
     ondone={() => loadFiles().catch(() => {})}
   />
   <ShareModal open={shareOpen} {project} {canManage} refreshKey={membersKey} onclose={() => (shareOpen = false)} />
+
+  {#if mobile}
+    <!-- Celular: menú ⋮ (exportar y el resto de acciones de la cabecera de escritorio) -->
+    <Sheet open={menuOpen} onclose={() => !exporting && (menuOpen = false)}>
+      {#snippet header()}
+        <div class="border-b border-slate-200 px-5 pt-1 pb-3">
+          <h2 class="truncate text-base font-semibold">{project.name}</h2>
+          <p class="truncate text-xs text-slate-500">
+            {[
+              project.main_file,
+              compileResult?.pages?.length && `${compileResult.pages.length} ${compileResult.pages.length === 1 ? 'página' : 'páginas'}`,
+              project.members > 0 && `${project.members + 1} personas`,
+            ]
+              .filter(Boolean)
+              .join(' · ')}
+          </p>
+        </div>
+      {/snippet}
+      <p class="px-5 pt-3 pb-1 text-xs font-semibold tracking-wide text-slate-500 uppercase">Exportar</p>
+      <button type="button" class="flex min-h-13 w-full cursor-pointer items-center gap-4 px-5 py-2 text-left active:bg-slate-100 disabled:cursor-default disabled:opacity-45" onclick={() => runExport('pdf')} disabled={!!exporting}>
+        <svg class="shrink-0 text-red-600" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" /><path d="M14 3v5h5" /><path d="M12 12v6m-3-3 3 3 3-3" /></svg>
+        <span class="min-w-0"><span class="block text-[15px] font-medium text-slate-900">{exporting === 'pdf' ? 'Compilando PDF…' : 'Descargar PDF'}</span><span class="block text-xs text-slate-500">Con las imágenes originales</span></span>
+      </button>
+      {#if canSharePdf}
+        <button type="button" class="flex min-h-13 w-full cursor-pointer items-center gap-4 px-5 py-2 text-left active:bg-slate-100 disabled:cursor-default disabled:opacity-45" onclick={() => runExport('share')} disabled={!!exporting}>
+          <svg class="shrink-0 text-primary" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12v7a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-7" /><path d="m16 6-4-4-4 4" /><path d="M12 2v13" /></svg>
+          <span class="min-w-0"><span class="block text-[15px] font-medium text-slate-900">{exporting === 'share' ? 'Compilando PDF…' : 'Enviar PDF…'}</span><span class="block text-xs text-slate-500">WhatsApp, correo, Drive… (menú del sistema)</span></span>
+        </button>
+      {/if}
+      {#if !guest}
+      <button type="button" class="flex min-h-13 w-full cursor-pointer items-center gap-4 px-5 py-2 text-left active:bg-slate-100 disabled:cursor-default disabled:opacity-45" onclick={() => runExport('zip')} disabled={!!exporting}>
+        <svg class="shrink-0 text-amber-600" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 8v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8" /><path d="M1 3h22v5H1z" /><path d="M10 12h4" /></svg>
+        <span class="min-w-0"><span class="block text-[15px] font-medium text-slate-900">{exporting === 'zip' ? 'Preparando…' : 'Descargar proyecto (.zip)'}</span><span class="block text-xs text-slate-500">Fuentes e imágenes, sin el historial de git</span></span>
+      </button>
+      <div class="my-1.5 h-px bg-slate-200"></div>
+      <button type="button" class="flex min-h-13 w-full cursor-pointer items-center gap-4 px-5 py-2 text-left active:bg-slate-100 disabled:cursor-default disabled:opacity-45" onclick={() => fromMenu(() => (shareOpen = true))}>
+        <svg class="shrink-0 text-slate-500" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M19 8v6M22 11h-6" /></svg>
+        <span class="text-[15px] text-slate-900">Compartir y enlace de revisión</span>
+      </button>
+      {:else}
+      <div class="my-1.5 h-px bg-slate-200"></div>
+      {/if}
+      <button type="button" class="flex min-h-13 w-full cursor-pointer items-center gap-4 px-5 py-2 text-left active:bg-slate-100 disabled:cursor-default disabled:opacity-45" onclick={() => fromMenu(() => (filesOpen = true))}>
+        <svg class="shrink-0 text-slate-500" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
+        <span class="text-[15px] text-slate-900">Archivos del proyecto</span>
+      </button>
+      {#if pane === 'editor' && !isBib && current?.editable}
+        <button type="button" class="flex min-h-13 w-full cursor-pointer items-center gap-4 px-5 py-2 text-left active:bg-slate-100 disabled:cursor-default disabled:opacity-45" onclick={() => fromMenu(() => onTool('search'))}>
+          <svg class="shrink-0 text-slate-500" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></svg>
+          <span class="text-[15px] text-slate-900">Buscar y reemplazar</span>
+        </button>
+      {/if}
+      {#if canGit}
+        <button type="button" class="flex min-h-13 w-full cursor-pointer items-center gap-4 px-5 py-2 text-left active:bg-slate-100 disabled:cursor-default disabled:opacity-45" onclick={() => fromMenu(pull)} disabled={!!gitBusy}>
+          <svg class="shrink-0 text-slate-500" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v12M6 10l6 6 6-6M5 20h14" /></svg>
+          <span class="text-[15px] text-slate-900">{gitBusy === 'pull' ? 'Trayendo cambios…' : 'Pull: traer cambios de GitHub'}</span>
+        </button>
+        <button type="button" class="flex min-h-13 w-full cursor-pointer items-center gap-4 px-5 py-2 text-left active:bg-slate-100 disabled:cursor-default disabled:opacity-45" onclick={() => fromMenu(openPush)} disabled={!!gitBusy}>
+          <svg class="shrink-0 text-slate-500" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20V8M6 14l6-6 6 6M5 4h14" /></svg>
+          <span class="text-[15px] text-slate-900">Push: enviar a GitHub</span>
+        </button>
+      {/if}
+      {#if !guest}
+      <button type="button" class="flex min-h-13 w-full cursor-pointer items-center gap-4 px-5 py-2 text-left active:bg-slate-100 disabled:cursor-default disabled:opacity-45" onclick={() => fromMenu(openSettings)}>
+        <svg class="shrink-0 text-slate-500" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1" /></svg>
+        <span class="text-[15px] text-slate-900">Ajustes del proyecto</span>
+      </button>
+      <a href="#/" class="flex min-h-13 w-full cursor-pointer items-center gap-4 px-5 py-2 text-left active:bg-slate-100 disabled:cursor-default disabled:opacity-45 no-underline">
+        <svg class="shrink-0 text-slate-500" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></svg>
+        <span class="text-[15px] text-slate-900">Todos los proyectos</span>
+      </a>
+      {:else}
+      <button type="button" class="flex min-h-13 w-full cursor-pointer items-center gap-4 px-5 py-2 text-left active:bg-slate-100" onclick={() => ((menuOpen = false), window.dispatchEvent(new Event('typsteditor:guest-exit')))}>
+        <svg class="shrink-0 text-slate-500" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" /><circle cx="12" cy="7" r="4" /></svg>
+        <span class="text-[15px] text-slate-900">Salir · cambiar mi nombre de invitado ({session.user.name})</span>
+      </button>
+      {/if}
+      <div class="h-3"></div>
+    </Sheet>
+
+    <!-- Celular: archivos -->
+    <Sheet open={filesOpen} tall onclose={() => (filesOpen = false)}>
+      {#snippet header()}
+        <div class="flex h-12 items-center pr-2 pl-5">
+          <h2 class="flex-1 text-base font-semibold">Archivos</h2>
+          {#if !readOnly}
+          <button
+            type="button"
+            class="flex size-11 cursor-pointer items-center justify-center rounded-full text-slate-600 active:bg-slate-100"
+            onclick={() => {
+              filesOpen = false
+              newFilePath = ''
+              fileError = ''
+              newFileOpen = true
+            }}
+            aria-label="Nuevo archivo"
+          >
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>
+          </button>
+          <button type="button" class="flex size-11 cursor-pointer items-center justify-center rounded-full text-slate-600 active:bg-slate-100" onclick={() => {
+              filesOpen = false
+              uploader?.openUpload()
+            }} aria-label="Subir archivos o fotos">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" /></svg>
+          </button>
+          {/if}
+        </div>
+      {/snippet}
+      <div class="flex h-full flex-col px-2">
+        <FileTree
+          projectId={id}
+          {files}
+          {currentPath}
+          mainFile={project.main_file}
+          peopleIn={(path) => people.filter((p) => p.paths.includes(path) && p.user_id !== session.user.id)}
+          onopen={openFile}
+          onremove={readOnly ? null : removeFile}
+          onreplace={readOnly ? null : (f) => ((filesOpen = false), uploader?.openReplace(f.path))}
+          ondropfiles={readOnly ? null : (list, folder) => uploader?.addFiles(list, { folder, autostart: true })}
+        />
+      </div>
+    </Sheet>
+
+    <!-- Celular: problemas de la última compilación -->
+    <Sheet open={problemsOpen} title="Problemas" onclose={() => (problemsOpen = false)}>
+      <ul class="pb-3">
+        {#each diagnostics as dg}
+          <li>
+            <button type="button" class="flex w-full cursor-pointer items-start gap-3 px-5 py-2.5 text-left active:bg-slate-100" onclick={() => onDiagnostic(dg)}>
+              <span class="mt-1.5 size-2 shrink-0 rounded-full {dg.severity === 'error' ? 'bg-red-600' : 'bg-amber-500'}"></span>
+              <span class="min-w-0">
+                <span class="block font-mono text-xs text-slate-500">{dg.file}:{dg.line}</span>
+                <span class="block text-sm break-words text-slate-800">{dg.message}</span>
+              </span>
+            </button>
+          </li>
+        {:else}
+          <li class="px-5 py-2 font-mono text-xs break-words whitespace-pre-wrap text-slate-700">{compileResult?.output || 'Error de compilación'}</li>
+        {/each}
+      </ul>
+    </Sheet>
+  {/if}
 
   <Modal open={newFileOpen} title="Nuevo archivo" onclose={() => (newFileOpen = false)}>
     <form class="flex flex-col gap-4" onsubmit={createFile}>
@@ -1002,7 +1372,7 @@
       {/if}
       <label class="flex flex-col gap-1.5">
         <span class="label">Mensaje del commit</span>
-        <textarea class="input !h-20 py-2" bind:value={pushMessage} maxlength="2000" placeholder="Actualización desde Typst Editor"></textarea>
+        <textarea class="input !h-20 py-2" bind:value={pushMessage} maxlength="2000" placeholder="Actualización desde Typst Extend"></textarea>
       </label>
       {#if !project.has_token}
         <p class="text-xs text-amber-700">El proyecto no tiene cuenta de GitHub asignada: el push fallará. Asígnale una en los ajustes.</p>

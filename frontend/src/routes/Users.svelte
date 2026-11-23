@@ -1,12 +1,14 @@
 <script>
   import { onMount } from 'svelte'
-  import { fly, slide } from 'svelte/transition'
-  import { api } from '../lib/api.js'
+  import { fly } from 'svelte/transition'
+  import { api, authConfig } from '../lib/api.js'
   import { session } from '../lib/session.svelte.js'
   import { d } from '../lib/motion.js'
   import Modal from '../lib/Modal.svelte'
 
-  const empty = () => ({ name: '', username: '', password: '', password2: '', role: 'user', active: true })
+  // Alta por correo: el administrador solo da el correo (usuario y nombre son
+  // opcionales) y la persona define su contraseña con el enlace que recibe.
+  const empty = () => ({ email: '', name: '', username: '', role: 'user', active: true })
 
   let users = $state([])
   let loading = $state(true)
@@ -19,6 +21,13 @@
   let error = $state('')
   let notice = $state('')
   let noticeTimer
+  // Enlace que no se pudo enviar por correo (sin RESEND o fallo): para copiarlo.
+  let manual = $state(null) // { user, link, reason }
+  let sending = $state(0) // id del usuario al que se reenvía el enlace
+  let copied = $state(false)
+  // Sin correo (MAIL_ENABLED=false o sin RESEND): contraseñas temporales.
+  let mailEnabled = $state(true)
+  let temp = $state(null) // { user, password }
 
   async function load() {
     loading = true
@@ -34,13 +43,14 @@
 
   onMount(() => {
     load()
+    authConfig().then((c) => (mailEnabled = c.mail_enabled), () => {})
     return () => clearTimeout(noticeTimer)
   })
 
   function showNotice(msg) {
     notice = msg
     clearTimeout(noticeTimer)
-    noticeTimer = setTimeout(() => (notice = ''), 4000)
+    noticeTimer = setTimeout(() => (notice = ''), 6000)
   }
 
   function openCreate() {
@@ -52,7 +62,7 @@
 
   function openEdit(u) {
     editingId = u.id
-    form = { name: u.name, username: u.username, password: '', password2: '', role: u.role, active: u.active }
+    form = { email: u.email, name: u.name, username: u.username, role: u.role, active: u.active }
     error = ''
     modalOpen = true
   }
@@ -61,22 +71,23 @@
     if (!saving) modalOpen = false
   }
 
+  // Resultado de un envío: aviso o, si no salió el correo, el enlace para copiarlo.
+  function afterLink(u, r, sentMsg) {
+    if (r.temp_password) temp = { user: u, password: r.temp_password }
+    else if (r.mail_sent) showNotice(sentMsg)
+    else manual = { user: u, link: r.link, reason: r.mail_error, purpose: r.purpose }
+  }
+
   async function submit(e) {
     e.preventDefault()
     error = ''
-    if (needsConfirm && form.password !== form.password2) {
-      error = 'Las contraseñas no coinciden.'
-      return
-    }
     saving = true
     try {
       if (editingId === null) {
-        await api.createUser({ name: form.name, username: form.username, password: form.password, role: form.role })
-        showNotice(`Usuario «${form.username}» creado correctamente.`)
+        const r = await api.createUser({ email: form.email, name: form.name, username: form.username, role: form.role })
+        afterLink(r.user, r, `Cuenta «${r.user.username}» creada. Enviamos a ${r.user.email} el enlace para definir la contraseña.`)
       } else {
-        const body = { name: form.name, role: form.role, active: form.active }
-        if (form.password) body.password = form.password
-        await api.updateUser(editingId, body)
+        await api.updateUser(editingId, { name: form.name, email: form.email, role: form.role, active: form.active })
         showNotice(`Usuario «${form.username}» actualizado.`)
       }
       modalOpen = false
@@ -88,17 +99,43 @@
     }
   }
 
+  async function sendLink(u) {
+    if (!mailEnabled && !confirm(`¿Generar una contraseña temporal nueva para ${u.name}? La actual dejará de funcionar y deberá cambiarla al entrar.`)) return
+    sending = u.id
+    try {
+      const r = await api.userAccessLink(u.id)
+      afterLink(u, r, u.pending
+        ? `Reenviamos a ${u.email} el enlace para definir la contraseña.`
+        : `Enviamos a ${u.email} un enlace para restablecer la contraseña.`)
+    } catch (e) {
+      loadError = e.message
+    } finally {
+      sending = 0
+    }
+  }
+
+  async function copyLink(text = manual.link) {
+    try {
+      await navigator.clipboard.writeText(text)
+      copied = true
+      setTimeout(() => (copied = false), 2000)
+    } catch {
+      /* el campo queda seleccionable */
+    }
+  }
+
   const isSelf = $derived(editingId !== null && editingId === session.user.id)
-  // Se pide confirmación al crear, o al editar si se escribe una contraseña nueva.
-  const needsConfirm = $derived(editingId === null || form.password !== '')
-  const mismatch = $derived(form.password2 !== '' && form.password !== form.password2)
 </script>
 
 <div class="flex flex-col gap-6">
   <div class="flex flex-wrap items-end justify-between gap-3">
     <div class="flex flex-col gap-1">
       <h1 class="text-3xl font-bold tracking-tight">Usuarios</h1>
-      <p class="text-sm text-slate-600">Crea y administra las cuentas de acceso.</p>
+      <p class="text-sm text-slate-600">
+        {mailEnabled
+          ? 'Crea cuentas con el correo de cada persona: recibirá un enlace para definir su contraseña.'
+          : 'El envío de correos está desactivado: cada cuenta nueva recibe una contraseña temporal que deberá cambiar al entrar.'}
+      </p>
     </div>
     <button type="button" class="btn-primary" onclick={openCreate}>
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
@@ -119,6 +156,7 @@
           <tr class="bg-primary-tint text-left text-xs font-semibold tracking-wide text-blue-900 uppercase">
             <th class="px-4 py-3">Nombre</th>
             <th class="px-4 py-3">Usuario</th>
+            <th class="px-4 py-3">Correo</th>
             <th class="px-4 py-3">Rol</th>
             <th class="px-4 py-3">Estado</th>
             <th class="px-4 py-3"><span class="sr-only">Acciones</span></th>
@@ -126,23 +164,36 @@
         </thead>
         <tbody>
           {#if loading && !users.length}
-            <tr><td colspan="5" class="px-4 py-6 text-center text-slate-500">Cargando…</td></tr>
+            <tr><td colspan="6" class="px-4 py-6 text-center text-slate-500">Cargando…</td></tr>
           {:else}
             {#each users as u (u.id)}
               <tr class="border-t border-slate-200" in:fly={{ y: 6, duration: d(200) }}>
                 <td class="px-4 py-3.5 font-medium">{u.name}</td>
                 <td class="px-4 py-3.5 text-slate-600">{u.username}</td>
+                <td class="max-w-56 truncate px-4 py-3.5 text-slate-600" title={u.email}>{u.email || '—'}</td>
                 <td class="px-4 py-3.5">
                   <span class="badge {u.role === 'admin' ? 'bg-blue-100 text-blue-900' : 'bg-slate-100 text-slate-700'}">
                     {u.role === 'admin' ? 'Administrador' : 'Usuario'}
                   </span>
                 </td>
                 <td class="px-4 py-3.5">
-                  <span class="badge {u.active ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800'}">
-                    {u.active ? 'Activo' : 'Inactivo'}
-                  </span>
+                  {#if !u.active}
+                    <span class="badge bg-red-100 text-red-800">Inactivo</span>
+                  {:else if u.must_change_password}
+                    <span class="badge bg-amber-100 text-amber-800" title="Tiene una contraseña temporal que debe cambiar al entrar">Clave temporal</span>
+                  {:else if u.pending}
+                    <span class="badge bg-amber-100 text-amber-800" title="Aún no definió su contraseña con el enlace del correo">Pendiente</span>
+                  {:else}
+                    <span class="badge bg-emerald-100 text-emerald-800">Activo</span>
+                  {/if}
                 </td>
-                <td class="px-4 py-3.5 text-right">
+                <td class="px-4 py-3.5 text-right whitespace-nowrap">
+                  {#if u.active && (u.pending || u.email || !mailEnabled)}
+                    <button type="button" class="btn-secondary btn-sm" onclick={() => sendLink(u)} disabled={sending === u.id}
+                      title={!mailEnabled ? 'Generar una contraseña temporal nueva' : u.pending ? 'Reenviar el enlace para definir la contraseña' : 'Enviar un enlace para restablecer la contraseña'}
+                      >{sending === u.id ? (mailEnabled ? 'Enviando…' : 'Generando…') : !mailEnabled ? 'Contraseña temporal' : u.pending ? 'Reenviar invitación' : 'Restablecer acceso'}</button
+                    >
+                  {/if}
                   <button type="button" class="btn-secondary btn-sm" onclick={() => openEdit(u)}>Editar</button>
                 </td>
               </tr>
@@ -159,32 +210,25 @@
     {#if error}<div class="alert-error" role="alert">{error}</div>{/if}
 
     <div class="flex flex-col gap-1.5">
-      <label for="u-name" class="label">Nombre</label>
-      <input id="u-name" class="input" required maxlength="128" bind:value={form.name} />
+      <label for="u-email" class="label">Correo {#if editingId !== null}<span class="font-normal text-slate-500">(para iniciar sesión, recuperar el acceso y avisos)</span>{/if}</label>
+      <input id="u-email" class="input" type="email" autocomplete="off" maxlength="254" required={editingId === null} bind:value={form.email} />
+      {#if editingId === null}
+        <span class="text-xs text-slate-500">
+          {mailEnabled
+            ? 'Le enviaremos un enlace para definir su contraseña; hasta entonces no podrá iniciar sesión.'
+            : 'El envío de correos está desactivado: se generará una contraseña temporal para entregársela.'}
+        </span>
+      {/if}
     </div>
     <div class="flex flex-col gap-1.5">
-      <label for="u-user" class="label">Usuario</label>
-      <input id="u-user" class="input" required pattern="[a-zA-Z0-9._\-]{'{3,64}'}" autocomplete="off"
+      <label for="u-name" class="label">Nombre {#if editingId === null}<span class="font-normal text-slate-500">(opcional; podrá cambiarlo al activar la cuenta)</span>{/if}</label>
+      <input id="u-name" class="input" required={editingId !== null} maxlength="128" bind:value={form.name} />
+    </div>
+    <div class="flex flex-col gap-1.5">
+      <label for="u-user" class="label">Usuario {#if editingId === null}<span class="font-normal text-slate-500">(opcional; si no, se toma del correo)</span>{/if}</label>
+      <input id="u-user" class="input" pattern="[a-zA-Z0-9._\-]{'{3,64}'}" autocomplete="off"
         disabled={editingId !== null} bind:value={form.username} />
     </div>
-    <div class="flex flex-col gap-1.5">
-      <label for="u-pass" class="label">
-        Contraseña {#if editingId !== null}<span class="font-normal text-slate-500">(dejar vacío para no cambiar)</span>{/if}
-      </label>
-      <input id="u-pass" class="input" type="password" autocomplete="new-password" minlength="8" maxlength="72"
-        required={editingId === null} bind:value={form.password} />
-    </div>
-    {#if needsConfirm}
-      <div class="flex flex-col gap-1.5" transition:slide={{ duration: d(180) }}>
-        <label for="u-pass2" class="label">Confirmar contraseña</label>
-        <input id="u-pass2" class="input {mismatch ? 'border-red-700 focus:border-red-700 focus:ring-red-100' : ''}"
-          type="password" autocomplete="new-password" required aria-invalid={mismatch}
-          aria-describedby={mismatch ? 'u-pass2-err' : undefined} bind:value={form.password2} />
-        {#if mismatch}
-          <span id="u-pass2-err" class="text-xs text-red-700">Las contraseñas no coinciden.</span>
-        {/if}
-      </div>
-    {/if}
     <div class="flex flex-col gap-1.5">
       <label for="u-role" class="label">Rol</label>
       <select id="u-role" class="input" disabled={isSelf} bind:value={form.role}>
@@ -202,8 +246,44 @@
     <div class="mt-2 flex justify-end gap-3">
       <button type="button" class="btn-secondary" onclick={closeModal} disabled={saving}>Cancelar</button>
       <button type="submit" class="btn-primary" disabled={saving}>
-        {saving ? 'Guardando…' : editingId === null ? 'Crear usuario' : 'Guardar cambios'}
+        {saving ? 'Guardando…' : editingId === null ? (mailEnabled ? 'Crear y enviar invitación' : 'Crear usuario') : 'Guardar cambios'}
       </button>
     </div>
   </form>
+</Modal>
+
+<Modal open={!!manual} title="Enlace de acceso" onclose={() => (manual = null)}>
+  {#if manual}
+    <div class="flex flex-col gap-4">
+      <div class="alert-info">
+        No se envió el correo{manual.reason ? ` (${manual.reason})` : ''}. Comparte este enlace con
+        <strong>{manual.user.name}</strong>{manual.user.email ? ` (${manual.user.email})` : ''} por otro medio:
+        {manual.purpose === 'setup' ? 'con él define su contraseña (vence en 7 días).' : 'con él elige una contraseña nueva (vence en 2 horas).'}
+      </div>
+      <div class="flex gap-2">
+        <label class="sr-only" for="u-link">Enlace</label>
+        <input id="u-link" class="input font-mono !text-xs" readonly value={manual.link} onfocus={(e) => e.currentTarget.select()} />
+        <button type="button" class="btn-primary shrink-0" onclick={copyLink}>{copied ? '¡Copiado!' : 'Copiar'}</button>
+      </div>
+      <div class="flex justify-end"><button type="button" class="btn-secondary" onclick={() => (manual = null)}>Cerrar</button></div>
+    </div>
+  {/if}
+</Modal>
+
+<Modal open={!!temp} title="Contraseña temporal" onclose={() => (temp = null)}>
+  {#if temp}
+    <div class="flex flex-col gap-4">
+      <p class="text-sm text-slate-700">
+        Entrega esta contraseña a <strong>{temp.user.name}</strong> (usuario <strong>{temp.user.username}</strong>{temp.user.email ? `, ${temp.user.email}` : ''}).
+        Al iniciar sesión deberá cambiarla por una propia.
+      </p>
+      <div class="flex gap-2">
+        <label class="sr-only" for="u-temp">Contraseña temporal</label>
+        <input id="u-temp" class="input font-mono text-base tracking-wide" readonly value={temp.password} onfocus={(e) => e.currentTarget.select()} />
+        <button type="button" class="btn-primary shrink-0" onclick={() => copyLink(temp.password)}>{copied ? '¡Copiada!' : 'Copiar'}</button>
+      </div>
+      <p class="text-xs text-amber-800">Solo se muestra ahora: no se guarda en claro. Si se pierde, genera otra desde la lista.</p>
+      <div class="flex justify-end"><button type="button" class="btn-secondary" onclick={() => (temp = null)}>Listo</button></div>
+    </div>
+  {/if}
 </Modal>

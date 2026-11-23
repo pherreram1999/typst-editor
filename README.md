@@ -1,4 +1,4 @@
-# Typst Editor
+# Typst Extend
 
 Editor web colaborativo de documentos [Typst](https://typst.app): varias personas editan el mismo documento a la vez, ven la vista previa y el PDF al instante y sincronizan el proyecto con GitHub.
 
@@ -16,6 +16,7 @@ Editor web colaborativo de documentos [Typst](https://typst.app): varias persona
 - **Organización personal.** Cada usuario destaca proyectos (siempre aparecen primero) y los agrupa en carpetas con color. Nadie más ve esa organización.
 - **Sincronización con GitHub.** Cada usuario registra sus cuentas (usuario + token). Al crear un proyecto puede buscar entre sus repositorios y cargar uno. *Pull* y *push* son manuales y usan el binario `git` del sistema.
 - **Usuarios y roles** (`admin` / `user`) con autenticación JWT.
+- **Agentes (MCP).** Un servidor [Model Context Protocol](https://modelcontextprotocol.io) en `/mcp` (SDK oficial de Go) permite que Claude, ChatGPT, Cursor o Claude Code listen y creen proyectos, lean y editen archivos (en vivo, junto a los demás editores), suban y descarguen archivos, compilen, vean páginas renderizadas y obtengan el PDF. Para conectores remotos usa OAuth 2.1; en local, tokens personales. Ver [Agentes (MCP)](#agentes-mcp).
 
 ## Tecnologías
 
@@ -23,7 +24,7 @@ Editor web colaborativo de documentos [Typst](https://typst.app): varias persona
 |---|---|
 | Frontend | Svelte 5, Vite 8, Tailwind CSS 4, CodeMirror 6 |
 | Backend | Go (`net/http`), WebSocket (`coder/websocket`), JWT HS256, bcrypt |
-| Base de datos | MariaDB (probado con 11.8; las migraciones usan `ALTER TABLE … IF NOT EXISTS`) |
+| Base de datos | MariaDB (probado con 11.8; las migraciones usan `ALTER TABLE … IF NOT EXISTS`) o libSQL remoto (Bunny Database, Turso, sqld), según `DB_DRIVER` |
 | Herramientas del sistema | `typst` (≥ 0.12), `git` |
 
 Identidad visual: color principal blue-800 (`#1E40AF`), neutros slate y tipografía Inter. Los tokens están en `frontend/src/app.css`.
@@ -32,7 +33,7 @@ Identidad visual: color principal blue-800 (`#1E40AF`), neutros slate y tipograf
 
 - Go 1.27 o superior (ver `backend/go.mod`).
 - Node.js en versión LTS reciente (probado con Node 26).
-- MariaDB.
+- MariaDB, o una base libSQL remota (Bunny Database, Turso, sqld).
 - `typst` y `git` en el `PATH`, o sus rutas en `TYPST_BIN` / `GIT_BIN`.
 
 ## Puesta en marcha
@@ -43,6 +44,16 @@ Identidad visual: color principal blue-800 (`#1E40AF`), neutros slate y tipograf
 # Cambia antes la contraseña del usuario 'typsteditor' en el script
 sudo mariadb < database/01_setup.sql
 ```
+
+**Con libSQL (Bunny Database)** no hace falta el script: crea la base en el panel de Bunny (*Database → Access*), copia la URL y genera un token. En `.env`:
+
+```bash
+DB_DRIVER=libsql
+DB_URL=libsql://<id-de-la-base>.lite.bunnydb.net
+DB_AUTH_TOKEN=<token>
+```
+
+El servidor crea las tablas al arrancar. En libSQL, la búsqueda de usuarios solo ignora mayúsculas en letras sin acento y los nombres se ordenan por bytes. En MariaDB, la intercalación `utf8mb4_unicode_ci` ignora mayúsculas y acentos.
 
 ### 2. Backend
 
@@ -83,12 +94,76 @@ Genera `./typst-editor` (binario estático, `CGO_ENABLED=0`; admite `GOOS`/`GOAR
 
 Si `STATIC_DIR` está vacío, el servidor usa `public/` junto al ejecutable y, si no existe, `../frontend/dist` (el caso de `go run .` desde `backend/`). Los archivos de `assets/` se envían con caché permanente (llevan hash en el nombre) e `index.html` con `no-cache`. Cualquier ruta que no sea un archivo devuelve `index.html`; las rutas `/api/` desconocidas devuelven 404 en JSON. Si no encuentra `index.html`, avisa al arrancar y solo sirve la API.
 
+### Docker
+
+El `Dockerfile` de la raíz compila frontend y servidor en etapas separadas. La imagen final se basa en Alpine e incluye el binario, `public/`, `fonts/`, el `typst` oficial (musl, versión fijada en `TYPST_VERSION`) y `git`. Pesa unos 60 MB comprimida y 196 MB en disco.
+
+```bash
+docker build -t typst-editor .                          # con las fuentes de Microsoft
+docker build --build-arg MS_FONTS=0 -t typst-editor .   # sin ellas
+```
+
+**Fuentes incluidas:**
+- **Microsoft** (`MS_FONTS=1`, por defecto): las *Core fonts for the Web* (Arial, Arial Black, Times New Roman, Courier New, Georgia, Verdana, Trebuchet MS, Comic Sans MS, Impact, Andale Mono, Webdings). Se descargan de SourceForge al construir la imagen.
+- **Carlito**: misma métrica que Calibri, así que el texto ocupa lo mismo.
+- Las del repositorio (Roboto, Roboto Mono) y las que trae `typst`.
+
+Calibri, Cambria y el resto de fuentes de Office no se pueden descargar libremente. Si tienes licencia, copia los `.ttf`/`.otf` a `fonts/` dentro del volumen (`/data/fonts`); el servidor las detecta sin reiniciar.
+
+> La licencia de las fuentes de Microsoft permite usarlas, pero no redistribuirlas fuera de sus instaladores originales. Usa la imagen en tu servidor y no la publiques en un registro público; si necesitas publicarla, constrúyela con `MS_FONTS=0`.
+
+**Volumen:** monta **`/data`**. Ahí se guardan:
+- `projects/<id>`: los proyectos, cada uno es un repositorio git;
+- `build/`: compilaciones y vista previa (se regeneran);
+- `review/`: enlaces de revisión;
+- `fonts/`: fuentes locales;
+- `packages/` y `cache/`: paquetes de Typst descargados.
+
+Sin este volumen, los proyectos se pierden al recrear el contenedor. El proceso corre como el usuario `app` (UID/GID `10001`). Un volumen con nombre ya tiene los permisos correctos. Si usas una carpeta del host, dásela antes a ese usuario: `sudo chown -R 10001:10001 /srv/typst-editor`.
+
+**Puerto:** **`8080`** (HTTP; sirve la app, la API y el WebSocket). Se cambia con `ADDR` y el *healthcheck* (`/api/health`) lo sigue.
+
+**Base de datos:** la imagen no incluye ninguna base. Al arrancar, el contenedor migra el esquema del motor que indique `DB_DRIVER`:
+- **MariaDB** (`DB_DRIVER=mysql`, por defecto): si la base `DB_NAME` no existe, la crea (utf8mb4) y después crea las tablas. Para eso el usuario de `DB_USER` necesita el privilegio `CREATE`. Si no lo tiene, crea antes la base y el usuario con `database/01_setup.sql`.
+- **libSQL / Bunny Database** (`DB_DRIVER=libsql`): la base se crea en el panel de Bunny, porque el protocolo no permite crearla. Las tablas las crea el contenedor.
+
+Para migrar sin arrancar el servidor (por ejemplo, en un paso previo al despliegue): `docker run --rm --env-file typst.env typst-editor migrate`.
+
+La configuración se pasa con variables de entorno o con `--env-file`; dentro del contenedor no hace falta un `.env`. `DATA_DIR`, `HOME` y las cachés ya apuntan a `/data`.
+
+```bash
+docker volume create typst-editor-data
+docker run -d --name typst-editor --restart unless-stopped \
+  -p 8080:8080 \
+  -v typst-editor-data:/data \
+  -e DB_HOST=db.ejemplo.local -e DB_NAME=typsteditor -e DB_USER=typsteditor -e DB_PASSWORD='…' \
+  -e JWT_SECRET="$(openssl rand -base64 48)" \
+  -e ADMIN_PASSWORD='…' \
+  typst-editor
+```
+
+Con Bunny Database, cambia las variables de MariaDB por:
+
+```bash
+  -e DB_DRIVER=libsql -e DB_URL=libsql://<id-de-la-base>.lite.bunnydb.net -e DB_AUTH_TOKEN='…' \
+```
+
+Guarda el `JWT_SECRET` (por ejemplo en un `--env-file`): si cambia, se cierran todas las sesiones.
+
+Si MariaDB corre en el mismo host, `127.0.0.1` dentro del contenedor no es el host. Tienes dos opciones:
+- `--network host`, y entonces no hace falta `-p`;
+- `--add-host=host.docker.internal:host-gateway -e DB_HOST=host.docker.internal`, con un usuario de MariaDB que acepte conexiones desde la red de Docker.
+
+Detrás de un proxy inverso, reenvía también el WebSocket (`Upgrade` / `Connection`) y usa HTTPS.
+
 ## Configuración (`backend/.env`)
 
 | Variable | Por defecto | Descripción |
 |---|---|---|
 | `ADDR` | `:8080` | Dirección de escucha (API y frontend) |
-| `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` | `127.0.0.1`, `3306`, `typsteditor`, `typsteditor`, — | Conexión a MariaDB |
+| `DB_DRIVER` | `mysql` | Motor de base de datos: `mysql` (MariaDB) o `libsql` |
+| `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` | `127.0.0.1`, `3306`, `typsteditor`, `typsteditor`, — | Conexión a MariaDB (`DB_DRIVER=mysql`) |
+| `DB_URL`, `DB_AUTH_TOKEN` | `BUNNY_DATABASE_URL`, `BUNNY_DATABASE_AUTH_TOKEN` | Conexión a libSQL (`DB_DRIVER=libsql`): `libsql://…`, `https://…` o `http://host:puerto`; un `?authToken=` en la URL también vale |
 | `JWT_SECRET` | — | Obligatorio, mínimo 32 caracteres (`go run . key:generate`) |
 | `TOKEN_TTL` | `8h` | Duración de la sesión |
 | `ADMIN_USER`, `ADMIN_NAME`, `ADMIN_PASSWORD` | `admin`, `Administrador`, — | Primer administrador (solo si no existe ninguno) |
@@ -96,6 +171,8 @@ Si `STATIC_DIR` está vacío, el servidor usa `public/` junto al ejecutable y, s
 | `TYPST_BIN`, `GIT_BIN` | `typst`, `git` | Binarios del sistema |
 | `GITHUB_API` | `https://api.github.com` | Cámbiala para GitHub Enterprise (`https://<host>/api/v3`) |
 | `STATIC_DIR` | `public/` junto al ejecutable, o `../frontend/dist` | Frontend compilado que sirve el propio servidor |
+| `PUBLIC_URL` | `http://localhost:<puerto de ADDR>` | URL pública, sin barra final: emisor OAuth y recurso MCP (`PUBLIC_URL/mcp`). Para conectores remotos debe ser https y accesible desde internet |
+| `MCP_ENABLED` | `true` | Servidor MCP (`/mcp`) y servidor OAuth (`/oauth/*`) |
 
 Las variables de entorno reales tienen prioridad sobre `.env`.
 
@@ -188,6 +265,135 @@ Un proyecto marcado como plantilla aparece en la galería **Plantillas** para to
 - Al quitar a un miembro se cierran al instante sus sesiones de edición.
 - Los miembros hacen pull/push con la cuenta de GitHub asignada al proyecto, sin ver nunca el token.
 
+## Agentes (MCP)
+
+El servidor expone sus funciones a agentes de IA por [MCP](https://modelcontextprotocol.io) (transporte *Streamable HTTP*, sin sesión) en `PUBLIC_URL/mcp`. Corre dentro del mismo proceso que la API: las ediciones del agente pasan por el hub colaborativo, así que quien tenga el archivo abierto las ve al instante y la vista previa se recompila.
+
+### Conectar un agente
+
+La URL del servidor MCP es siempre `PUBLIC_URL/mcp`, y la página **Agentes** de la web la muestra con un botón para copiarla. Hay dos formas de autenticarse:
+
+| | Token personal | OAuth 2.1 |
+|---|---|---|
+| Para | clientes en tu máquina: Claude Code, Cursor, VS Code, scripts | conectores remotos: claude.ai, Claude Desktop, ChatGPT (también Claude Code) |
+| Cómo | lo creas en **Agentes** y lo pegas en el cliente | el cliente se registra solo y te pide autorizar en el navegador |
+| `PUBLIC_URL` | cualquiera (vale `http://localhost:8080`) | https y accesible desde internet (los clientes locales con OAuth aceptan `localhost`) |
+
+#### 1. Preparar `PUBLIC_URL`
+
+`PUBLIC_URL` es la dirección con la que los clientes llegan al servidor, sin barra final. Es el emisor de OAuth y el recurso al que se ligan los tokens, así que **debe coincidir exactamente** con la URL que pongas en el cliente: `http://localhost:8080` y `http://127.0.0.1:8080` no son la misma. Reinicia el servidor tras cambiarla; al arrancar, el log muestra `MCP: <PUBLIC_URL>/mcp`.
+
+- **Solo en local:** déjala vacía y se usa `http://localhost:<puerto de ADDR>`.
+- **Conector remoto en desarrollo**, con un túnel:
+  ```bash
+  cloudflared tunnel --url http://localhost:8080
+  # → https://algo-aleatorio.trycloudflare.com
+  ```
+  En `backend/.env` pon `PUBLIC_URL=https://algo-aleatorio.trycloudflare.com` y reinicia. Los túneles rápidos cambian de URL en cada ejecución, así que entonces hay que actualizar `PUBLIC_URL` y volver a añadir el conector. `ngrok http 8080` funciona igual.
+- **Producción:** usa el dominio https del proxy inverso, p. ej. `PUBLIC_URL=https://typst.midominio.com`. El proxy debe reenviar `/mcp`, `/oauth/` y `/.well-known/` al backend, sin buffering en `/mcp` y con un tiempo de espera largo (compilar puede tardar minutos). Ver [Detrás de un proxy inverso](#detrás-de-un-proxy-inverso).
+
+Comprobación rápida: `curl -i PUBLIC_URL/mcp` debe responder `401` con una cabecera `WWW-Authenticate` que apunta a `PUBLIC_URL/.well-known/oauth-protected-resource/mcp`.
+
+#### 2a. Con token personal
+
+1. En la web abre **Agentes** › «Crear token personal».
+2. Elige el nombre, el permiso (lectura o lectura y escritura), los proyectos y la caducidad.
+3. Copia el token (`tse_…`). Se muestra una sola vez; si lo pierdes, revócalo y crea otro.
+
+**Claude Code** (el comando aparece ya relleno al crear el token):
+```bash
+claude mcp add --transport http typst-extend http://localhost:8080/mcp \
+  --header "Authorization: Bearer tse_…"
+# --scope user para todos tus proyectos, --scope project para compartirlo en .mcp.json
+claude mcp list        # debe mostrar typst-extend como conectado
+```
+
+**Cursor** (`~/.cursor/mcp.json` o `.cursor/mcp.json`), **Claude Code** (`.mcp.json`) y otros clientes con el mismo formato:
+```json
+{
+  "mcpServers": {
+    "typst-extend": {
+      "type": "http",
+      "url": "http://localhost:8080/mcp",
+      "headers": { "Authorization": "Bearer tse_…" }
+    }
+  }
+}
+```
+
+**VS Code** (`.vscode/mcp.json`). El token se pide al conectar y no queda en el archivo:
+```json
+{
+  "inputs": [{ "id": "typst-token", "type": "promptString", "description": "Token de Typst Extend", "password": true }],
+  "servers": {
+    "typst-extend": {
+      "type": "http",
+      "url": "http://localhost:8080/mcp",
+      "headers": { "Authorization": "Bearer ${input:typst-token}" }
+    }
+  }
+}
+```
+
+**MCP Inspector**, para probar las herramientas a mano: ejecuta `npx @modelcontextprotocol/inspector`. Elige el transporte *Streamable HTTP* con la URL `http://localhost:8080/mcp` y añade la cabecera `Authorization: Bearer tse_…`, o usa su flujo OAuth.
+
+**Desde un script** (JSON-RPC directo):
+```bash
+curl -s http://localhost:8080/mcp \
+  -H "Authorization: Bearer tse_…" \
+  -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_projects","arguments":{}}}'
+```
+
+#### 2b. Con OAuth (conectores remotos)
+
+Con `PUBLIC_URL` en https:
+
+- **claude.ai y Claude Desktop:** abre *Configuración › Conectores › Añadir conector personalizado*, pon un nombre (p. ej. «Typst Extend») y la URL `https://…/mcp`, y deja vacíos el *Client ID* y el *Client Secret*. Pulsa «Conectar». En planes de equipo o empresa puede que solo un administrador de la organización pueda añadirlo.
+- **ChatGPT:** activa *Configuración › Conectores › Avanzado › Modo desarrollador*. Luego, en *Conectores › Crear*, pon la URL `https://…/mcp` y la autenticación *OAuth*, y confirma que confías en el conector.
+- **Claude Code con OAuth**, sin token: `claude mcp add --transport http typst-extend https://…/mcp`. Después, dentro de Claude Code, ejecuta `/mcp` › *typst-extend* › *Authenticate*. Funciona también con `http://localhost:8080/mcp`, porque se aceptan las redirecciones a `localhost`.
+
+En todos los casos el cliente se registra solo (registro dinámico, RFC 7591) y abre en el navegador la pantalla **Autorizar aplicación** de Typst Extend. Si no tienes sesión, primero pide el usuario y la contraseña y luego vuelve a esa pantalla. Ahí eliges:
+- **Permisos:** solo lectura, o lectura y escritura.
+- **Proyectos:** todos tus proyectos (también los que se creen después) o solo los que marques.
+
+Al autorizar vuelves a la aplicación, que queda conectada. Renueva el acceso sola (tokens de 1 h con refresco de 30 días); si dejas de usarla más de 30 días, habrá que autorizarla otra vez.
+
+#### Problemas frecuentes
+
+- **El cliente dice que no puede conectar o que falta la autorización:** revisa con `curl -i https://…/mcp` que responde `401` y que `https://…/.well-known/oauth-authorization-server` devuelve JSON con tu `PUBLIC_URL` como `issuer`. Si sale `localhost` o `http://`, `PUBLIC_URL` no está bien puesta o el servidor no se ha reiniciado.
+- **`invalid_target` o «recurso no válido» al autorizar:** la URL del conector no coincide con `PUBLIC_URL/mcp` (otro host, otro puerto, `http` en lugar de `https`).
+- **«Proyecto no encontrado»:** el acceso está limitado a otros proyectos, o el usuario no es propietario ni miembro del proyecto. Un administrador tampoco ve por MCP los proyectos de otros. Cambia los proyectos en **Agentes** › «Permisos».
+- **«Este acceso es de solo lectura»:** el token o la aplicación no tiene `typst:write`. Edítalo en **Agentes**; con OAuth también puedes revocarlo y volver a conectar.
+- **La aplicación dejó de funcionar de repente:** se revocó en **Agentes**, el usuario se desactivó, o se reutilizó un token de refresco (por seguridad eso revoca el acceso entero). Vuelve a conectar.
+
+**Permisos.** Cada llamada se comprueba de nuevo:
+1. El agente actúa como el usuario: solo ve sus proyectos y los compartidos con él. Si el usuario se desactiva o pierde el acceso a un proyecto, el agente también lo pierde al instante.
+2. Por MCP, el rol de administrador no da acceso a los proyectos de otros.
+3. Cada acceso (aplicación autorizada o token personal) puede limitarse a ciertos proyectos. Los proyectos que cree el agente se añaden a la lista.
+4. Hay dos permisos: `typst:read` (leer, compilar, ver páginas, descargar) y `typst:write` (además crear proyectos y crear, editar, subir, renombrar y borrar archivos).
+
+Los accesos se revisan, editan y revocan en **Agentes**. Los tokens se guardan solo como hash SHA-256. Los de acceso OAuth duran 1 h y los de refresco 30 días. Los de refresco rotan con cada uso, y reutilizar uno revoca todo el acceso.
+
+**Herramientas**
+
+| Herramienta | Permiso | Qué hace |
+|---|---|---|
+| `whoami` | lectura | usuario y alcance del acceso |
+| `list_projects`, `get_project`, `list_templates` | lectura | proyectos accesibles (con quién los está editando) y plantillas |
+| `create_project` | escritura | vacío o como copia de una plantilla o de otro proyecto |
+| `update_project` | escritura | nombre o archivo principal (solo el propietario) |
+| `list_files`, `read_file`, `search_files` | lectura | archivos, lectura por líneas numeradas, búsqueda (texto o regex) |
+| `write_file`, `edit_file`, `insert_text` | escritura | crear/reescribir, reemplazo exacto de un fragmento, insertar en una línea |
+| `rename_file`, `delete_file` | escritura | mover o borrar (no el archivo principal) |
+| `upload_file`, `create_upload_url`, `upload_from_url` | escritura | subir en base64, con un enlace de un solo uso (`curl -T`) o desde una URL https pública |
+| `download_file`, `view_image`, `export_project` | lectura | contenido o enlace de descarga (10 min), ver una imagen, `.zip` del proyecto |
+| `compile` | lectura | compila y devuelve páginas y errores/advertencias con archivo:línea |
+| `render_pages` | lectura | páginas como PNG (hasta 4 por llamada) |
+| `page_source` | lectura | qué archivo y línea generan cada bloque de una página |
+| `get_pdf` | lectura | enlace al PDF (o el PDF incrustado) |
+| `git_status` | lectura | estado git local (solo el propietario); pull y push se hacen desde la web |
+
 ## API
 
 Todas las rutas van bajo `/api` y usan `Authorization: Bearer <token>`. La excepción es el WebSocket, que recibe el token en `?token=`. En cada petición el backend vuelve a leer el usuario, así que desactivarlo o cambiar su rol surte efecto de inmediato.
@@ -225,13 +431,38 @@ Todas las rutas van bajo `/api` y usan `Authorization: Bearer <token>`. La excep
 | GET | `/github/accounts/{id}/repos` | dueño; `?refresh=1` ignora la caché de 2 min |
 | GET | `/github/accounts/{id}/branches?repo=owner/name` | dueño |
 | GET | `/health` | público |
+| GET · POST | `/mcp/grants` · `/mcp/tokens` | sesión; accesos MCP propios / crear token personal `{name, scopes, all_projects, projects, expires_days}` |
+| PUT · DELETE | `/mcp/grants/{id}` | dueño; `{scopes, all_projects, projects}` |
+| GET · POST | `/oauth/authorize/info` · `/oauth/authorize` | sesión; pantalla de consentimiento OAuth |
 
-## Producción
+Fuera de `/api`: `POST /mcp` (MCP, token en `Authorization`), `/.well-known/oauth-protected-resource[/mcp]`, `/.well-known/oauth-authorization-server`, `/oauth/register`, `/oauth/authorize`, `/oauth/token` y `/oauth/revoke`.
 
-El backend solo sirve la API. Para producción:
-- compila el frontend (`npm run build`) y sirve `frontend/dist/` con tu servidor web;
-- reenvía `/api` al backend, permitiendo la actualización a WebSocket (`Upgrade` / `Connection`);
-- usa HTTPS: el frontend se conecta por `wss://` cuando la página se sirve por HTTPS.
+## Detrás de un proxy inverso
+
+El servidor de Go sirve la app, la API y el MCP en un solo puerto (ver [Producción](#producción)). Si lo pones detrás de nginx, Caddy, etc.:
+- reenvía todo (`/`) al backend, permitiendo la actualización a WebSocket (`Upgrade` / `Connection`) en `/api`;
+- usa HTTPS: el frontend se conecta por `wss://` cuando la página se sirve por HTTPS, y los conectores MCP remotos lo exigen;
+- pon `PUBLIC_URL` con el dominio público (`https://typst.midominio.com`);
+- en `/mcp` desactiva el buffering de respuestas (`proxy_buffering off` en nginx), permite cuerpos de hasta 32 MB y usa un tiempo de espera de unos 10 min, porque compilar y renderizar puede tardar.
+
+Ejemplo de nginx:
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;  # map $http_upgrade $connection_upgrade {default upgrade; '' close;}
+    proxy_set_header Host $host;
+    client_max_body_size 32m;
+}
+location /mcp {
+    proxy_pass http://127.0.0.1:8080;
+    proxy_http_version 1.1;
+    proxy_buffering off;
+    proxy_read_timeout 600s;
+    client_max_body_size 32m;
+}
+```
 
 ## Seguridad
 

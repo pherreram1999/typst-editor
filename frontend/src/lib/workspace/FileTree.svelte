@@ -203,7 +203,7 @@
     <li data-dir={d.path} data-folder={d.path} class="rounded-md {dropDir === d.path ? 'bg-primary-tint ring-2 ring-primary ring-inset' : ''}">
       <button
         type="button"
-        class="flex w-full cursor-pointer items-center gap-1.5 rounded-md py-1 pr-2 text-left text-[13px] text-slate-700 hover:bg-slate-200/70"
+        class="flex w-full cursor-pointer items-center gap-1.5 rounded-md py-1 pointer-coarse:py-2.5 pointer-coarse:text-[15px] pr-2 text-left text-[13px] text-slate-700 hover:bg-slate-200/70"
         style="padding-left: {depth * 12 + 4}px"
         onclick={() => toggle(d.path)}
         aria-expanded={open}
@@ -223,7 +223,7 @@
     <li class="group relative" data-dir={parentOf(f.path)}>
       <button
         type="button"
-        class="flex w-full cursor-pointer items-center gap-1.5 rounded-md py-1 {onreplace && !f.editable ? 'pr-14' : 'pr-8'} text-left text-[13px] {f.path === currentPath
+        class="flex w-full cursor-pointer items-center gap-1.5 rounded-md py-1 pointer-coarse:py-2.5 pointer-coarse:text-[15px] {onreplace && !f.editable ? 'pr-14 pointer-coarse:pr-22' : 'pr-8 pointer-coarse:pr-11'} text-left text-[13px] {f.path === currentPath
           ? 'bg-primary-soft font-semibold text-primary'
           : 'text-slate-700 hover:bg-slate-200/70'}"
         style="padding-left: {depth * 12 + 22}px"
@@ -239,11 +239,11 @@
           <span class="size-2 shrink-0 rounded-full" style="background-color: {p.color}" title={p.name}></span>
         {/each}
       </button>
-      <div class="absolute top-1/2 right-1 hidden -translate-y-1/2 items-center gap-0.5 group-hover:flex">
+      <div class="absolute top-1/2 right-1 hidden -translate-y-1/2 items-center gap-0.5 group-hover:flex pointer-coarse:flex">
         {#if onreplace && !f.editable}
           <button
             type="button"
-            class="flex size-6 cursor-pointer items-center justify-center rounded text-slate-400 hover:bg-slate-200 hover:text-slate-900"
+            class="flex size-6 cursor-pointer items-center justify-center rounded text-slate-400 pointer-coarse:size-9 hover:bg-slate-200 hover:text-slate-900"
             onclick={() => onreplace(f)}
             aria-label="Reemplazar {f.path}"
             title="Reemplazar"
@@ -251,10 +251,10 @@
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 2l4 4-4 4" /><path d="M3 11V9a3 3 0 0 1 3-3h15M7 22l-4-4 4-4" /><path d="M21 13v2a3 3 0 0 1-3 3H3" /></svg>
           </button>
         {/if}
-        {#if f.path !== mainFile}
+        {#if onremove && f.path !== mainFile}
           <button
             type="button"
-            class="flex size-6 cursor-pointer items-center justify-center rounded text-slate-400 hover:bg-red-100 hover:text-red-700"
+            class="flex size-6 cursor-pointer items-center justify-center rounded text-slate-400 pointer-coarse:size-9 hover:bg-red-100 hover:text-red-700"
             onclick={() => onremove(f)}
             aria-label="Eliminar {f.path}"
             title="Eliminar"
@@ -284,7 +284,7 @@
         onkeydown={onKey}
         placeholder="Buscar archivo…"
         aria-label="Buscar archivo"
-        class="h-7 w-full rounded-md border border-slate-200 bg-surface pr-2 pl-7 text-[13px] outline-none placeholder:text-slate-400 focus:border-primary focus:ring-2 focus:ring-primary/20"
+        class="h-7 w-full rounded-md border pointer-coarse:h-10 pointer-coarse:text-base border-slate-200 bg-surface pr-2 pl-7 text-[13px] outline-none placeholder:text-slate-400 focus:border-primary focus:ring-2 focus:ring-primary/20"
       />
     </div>
     {#if dirCount && !q}

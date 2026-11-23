@@ -9,9 +9,17 @@
   // numbered image figure table math link cite ref(label?) search. Con poco ancho,
   // las de menor prioridad pasan al menú «Más». Teclado: ←/→ recorren los
   // botones (una sola parada de Tab), Esc cierra tooltips y menús.
+  //
+  // compact (celular): barra inferior sobre el teclado, sin nombre de archivo
+  // ni deshacer/rehacer (están en la cabecera), botones de 40 px, sin
+  // tooltips; no pliega nada: se desplaza con el dedo y los menús se abren
+  // hacia arriba, a lo ancho de la barra.
   import { onDestroy } from 'svelte'
+  import { MARGIN_OPTIONS } from './marginGuide.js'
 
-  let { file = '', active = {}, labels = () => [], disabled = false, onaction } = $props()
+  // margin: columna de la guía de margen derecho (0: sin guía); se elige en
+  // «Más» y se avisa con onaction('margin', columna).
+  let { file = '', active = {}, labels = () => [], disabled = false, compact = false, margin = 0, onaction } = $props()
 
   const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform)
   const k = (s) => (isMac ? s.replace(/Ctrl\+/g, '⌘').replace(/Alt\+/g, '⌥').replace(/Mayús\+/g, '⇧') : s)
@@ -69,6 +77,7 @@
 
   // ---------- plegado según el ancho ----------
   let bar = $state()
+  let wrap = $state() // la barra y, en compact, sus menús
   let width = $state(9999)
   $effect(() => {
     if (!bar) return
@@ -76,8 +85,9 @@
     ro.observe(bar)
     return () => ro.disconnect()
   })
-  const foldLevel = $derived(width < 470 ? 2 : width < 640 ? 1 : 0)
-  const visibleGroups = $derived(GROUPS.map((g) => g.filter((t) => !t.fold || t.fold > foldLevel)).filter((g) => g.length))
+  const foldLevel = $derived(compact ? 0 : width < 470 ? 2 : width < 640 ? 1 : 0)
+  const groups = $derived(compact ? [...GROUPS.slice(1), [SEARCH]] : GROUPS)
+  const visibleGroups = $derived(groups.map((g) => g.filter((t) => !t.fold || t.fold > foldLevel)).filter((g) => g.length))
   const folded = $derived(GROUPS.map((g) => g.filter((t) => t.fold && t.fold <= foldLevel)).filter((g) => g.length))
 
   const isActive = (t) => (t.id === 'heading' ? active.heading > 0 : !!active[t.id])
@@ -89,6 +99,7 @@
   let lastTip = 0
   function showTip(id, now = false) {
     clearTimeout(tipTimer)
+    if (compact) return
     // Entre botones vecinos, al instante; si no, a los 400 ms.
     if (now || Date.now() - lastTip < 300) tip = id
     else tipTimer = setTimeout(() => (tip = id), 400)
@@ -118,7 +129,7 @@
     else act(t.id)
   }
   function onWindowPointer(e) {
-    if (menu && bar && !bar.contains(e.target)) menu = null
+    if (menu && wrap && !wrap.contains(e.target)) menu = null
   }
   function onWindowKey(e) {
     if (e.key === 'Escape' && (menu || tip)) {
@@ -181,10 +192,11 @@
       type="button"
       data-tool={t.id}
       tabindex={tabIndexOf(order.indexOf(t.id))}
-      class="flex h-7 cursor-pointer items-center justify-center gap-px rounded-md transition-colors disabled:cursor-default disabled:opacity-40 {t.menu &&
-      t.id === 'heading'
-        ? 'w-9'
-        : 'w-7'} {on || menu === t.id ? 'bg-primary-soft text-primary' : 'text-slate-600 hover:bg-slate-200 hover:text-slate-900'} focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:outline-none"
+      class="flex shrink-0 cursor-pointer items-center justify-center gap-px rounded-md transition-colors disabled:cursor-default disabled:opacity-40 {compact
+        ? 'h-10 w-10 rounded-lg'
+        : t.menu && t.id === 'heading'
+          ? 'h-7 w-9'
+          : 'h-7 w-7'} {on || menu === t.id ? 'bg-primary-soft text-primary' : 'text-slate-600 hover:bg-slate-200 hover:text-slate-900'} focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:outline-none"
       aria-label={t.label}
       aria-describedby={tip === t.id ? `tip-${t.id}` : undefined}
       aria-pressed={t.menu ? undefined : on}
@@ -197,37 +209,41 @@
       onfocus={() => !menu && showTip(t.id, true)}
       onblur={hideTip}
     >
-      {@render icon(t.id)}
-      {#if t.id === 'heading'}{@render icon('chevron', 10)}{/if}
+      {@render icon(t.id, compact ? 20 : 16)}
+      {#if t.id === 'heading' && !compact}{@render icon('chevron', 10)}{/if}
     </button>
     {#if tip === t.id && menu !== t.id}{@render tooltip(t, alignRight)}{/if}
-    {#if menu === 'heading' && t.id === 'heading'}
-      <div role="menu" aria-label="Encabezado" class="absolute top-[34px] left-0 z-40 flex w-56 flex-col rounded-lg border border-slate-200 bg-surface p-1 shadow-lg">
+    {#if menu === 'heading' && t.id === 'heading' && !compact}
+      {@render headingMenu('absolute top-[34px] left-0 w-56')}
+    {/if}
+    {#if menu === 'ref' && t.id === 'ref' && !compact}
+      {@render refMenu('absolute top-[34px] left-0 w-64')}
+    {/if}
+  </div>
+{/snippet}
+
+{#snippet headingMenu(pos)}
+      <div role="menu" aria-label="Encabezado" class="{pos} z-40 flex flex-col rounded-lg border border-slate-200 bg-surface p-1 shadow-lg">
         {#each HEADINGS as [lvl, label, keys, prefix]}
           <button
             type="button"
             role="menuitemradio"
             aria-checked={(active.heading ?? 0) === lvl}
-            class="flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-left text-[13px] text-slate-800 hover:bg-slate-100 {(active.heading ?? 0) === lvl
+            class="flex {compact ? 'h-11' : 'h-8'} cursor-pointer items-center gap-2 rounded-md px-2 text-left text-[13px] text-slate-800 hover:bg-slate-100 {(active.heading ?? 0) === lvl
               ? 'bg-primary-tint font-semibold text-primary'
               : ''}"
             onclick={() => act('heading', lvl)}
           >
             <span class="w-7 font-mono text-xs text-slate-500">{prefix}</span>
             <span class="flex-1 {lvl === 1 ? 'text-[15px] font-bold' : lvl === 2 ? 'text-sm font-semibold' : lvl === 3 ? 'font-semibold' : ''}">{label}</span>
-            <kbd class="font-mono text-[11px] text-slate-400">{k(keys)}</kbd>
+            {#if !compact}<kbd class="font-mono text-[11px] text-slate-400">{k(keys)}</kbd>{/if}
           </button>
         {/each}
       </div>
-    {/if}
-    {#if menu === 'ref' && t.id === 'ref'}
-      {@render refMenu('left-0')}
-    {/if}
-  </div>
 {/snippet}
 
 {#snippet refMenu(pos)}
-  <div role="menu" aria-label="Referencias" class="absolute top-[34px] {pos} z-40 flex max-h-72 w-64 flex-col overflow-y-auto rounded-lg border border-slate-200 bg-surface p-1 shadow-lg">
+  <div role="menu" aria-label="Referencias" class="{pos} z-40 flex max-h-72 flex-col overflow-y-auto rounded-lg border border-slate-200 bg-surface p-1 shadow-lg">
     <span class="px-2 pt-1.5 pb-1 text-[11px] font-semibold tracking-wide text-slate-500 uppercase">Etiquetas de este archivo</span>
     {#each refLabels as l (l)}
       <button type="button" role="menuitem" class="flex h-8 cursor-pointer items-center gap-2 rounded-md px-2 text-left font-mono text-[13px] text-slate-800 hover:bg-slate-100" onclick={() => act('ref', l)}>
@@ -246,21 +262,40 @@
   </div>
 {/snippet}
 
+<!-- En compact los botones no toman el foco: el editor lo conserva y el
+     teclado del celular no se cierra a cada toque. -->
+<div
+  bind:this={wrap}
+  class="relative min-w-0 shrink-0"
+  role="presentation"
+  onpointerdown={(e) => compact && e.target.closest('button') && e.preventDefault()}
+>
+{#if compact && menu === 'heading'}
+  {@render headingMenu('absolute bottom-full inset-x-2 mb-1')}
+{:else if compact && menu === 'ref'}
+  {@render refMenu('absolute bottom-full inset-x-2 mb-1')}
+{/if}
 <div
   bind:this={bar}
   role="toolbar"
   aria-label="Herramientas del editor"
   aria-orientation="horizontal"
   tabindex="-1"
-  class="flex h-10 min-w-0 shrink-0 items-center gap-0.5 border-b border-slate-200 bg-surface pr-2 pl-3"
+  class="flex min-w-0 items-center gap-0.5 bg-surface {compact
+    ? 'h-12 overflow-x-auto border-t border-slate-200 px-1.5 [scrollbar-width:none]'
+    : 'h-10 border-b border-slate-200 pr-2 pl-3'}"
   onkeydown={onBarKey}
 >
-  <span class="mr-1 min-w-0 shrink truncate font-mono text-xs text-slate-600" title={file}>{file || '—'}</span>
+  {#if !compact}
+    <span class="mr-1 min-w-0 shrink truncate font-mono text-xs text-slate-600" title={file}>{file || '—'}</span>
+  {/if}
   {#if !disabled}
-    {#each visibleGroups as g}
-      <div aria-hidden="true" class="mx-1.5 h-[18px] w-px shrink-0 bg-slate-200"></div>
+    {#each visibleGroups as g, gi}
+      {#if !compact || gi > 0}<div aria-hidden="true" class="mx-1.5 h-[18px] w-px shrink-0 bg-slate-200"></div>{/if}
       {#each g as t (t.id)}{@render button(t)}{/each}
     {/each}
+  {/if}
+  {#if !disabled && !compact}
     <div class="min-w-2 flex-1"></div>
     {@render button(SEARCH, true)}
     <div class="relative flex">
@@ -314,14 +349,28 @@
                 </button>
               {/if}
             {/each}
-          {:else}
-            <p class="px-2 py-1.5 text-xs text-slate-500">Todas las herramientas están a la vista. Las próximas aparecerán aquí.</p>
           {/each}
+          {#if folded.length}<div aria-hidden="true" class="mx-1 my-1.5 h-px bg-slate-200"></div>{/if}
+          <div class="flex items-center gap-1 px-2 py-1" role="group" aria-label="Guía de margen derecho">
+            <svg class="mr-1 shrink-0 text-slate-600" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h9M4 10h11M4 14h8M4 18h10" /><path d="M18 3v18" stroke-dasharray="2 2" /></svg>
+            <span class="flex-1 text-[13px] whitespace-nowrap text-slate-800" title="Línea vertical que marca hasta qué columna no debería llegar el texto (como en los IDE de JetBrains)">Guía de margen</span>
+            {#each [[0, 'No'], ...MARGIN_OPTIONS.map((c) => [c, String(c)])] as [col, label] (col)}
+              <button
+                type="button"
+                role="menuitemradio"
+                aria-checked={margin === col}
+                class="h-7 min-w-8 cursor-pointer rounded-md px-1.5 text-xs tabular-nums {margin === col ? 'bg-primary-soft font-semibold text-primary' : 'text-slate-600 hover:bg-slate-100'}"
+                title={col ? `Guía en la columna ${col}` : 'Sin guía'}
+                onclick={() => act('margin', col)}>{label}</button
+              >
+            {/each}
+          </div>
         </div>
       {/if}
       {#if menu === 'ref' && folded.flat().some((t) => t.id === 'ref')}
-        {@render refMenu('right-0')}
+        {@render refMenu('absolute top-[34px] right-0 w-64')}
       {/if}
     </div>
   {/if}
+</div>
 </div>

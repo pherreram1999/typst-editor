@@ -33,17 +33,21 @@ type wsIn struct {
 // (los navegadores no permiten cabeceras en WebSocket: el token va en la URL).
 func (s *Server) projectWS(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	uid, err := s.tokens.Parse(q.Get("token"))
-	if err != nil {
-		writeError(w, http.StatusUnauthorized, "token inválido o expirado")
+	tok := q.Get("token")
+	u, g, status, msg := s.authenticate(r.Context(), tok)
+	if status != 0 {
+		writeError(w, status, msg)
 		return
 	}
-	u, err := s.userByID(r.Context(), uid)
-	if err != nil || !u.Active {
-		writeError(w, http.StatusUnauthorized, "sesión no válida")
+	if u.MustChangePassword {
+		writeError(w, http.StatusForbidden, "debes cambiar tu contraseña temporal antes de continuar")
 		return
 	}
-	r = r.WithContext(context.WithValue(r.Context(), ctxKey{}, u)) // para loadProject
+	ctx0 := context.WithValue(r.Context(), ctxKey{}, u) // para loadProject
+	if g != nil {
+		ctx0 = context.WithValue(ctx0, guestKey{}, g)
+	}
+	r = r.WithContext(ctx0)
 	p, ok := s.loadProject(w, r)
 	if !ok {
 		return
@@ -77,11 +81,25 @@ func (s *Server) projectWS(w http.ResponseWriter, r *http.Request) {
 
 	var idb [8]byte
 	_, _ = rand.Read(idb[:])
-	peer := collab.NewPeer(hex.EncodeToString(idb[:]), u.ID, u.Name, peerColors[int(u.ID)%len(peerColors)])
+	color := peerColors[int(u.ID%int64(len(peerColors))+int64(len(peerColors)))%len(peerColors)]
+	peer := collab.NewPeer(hex.EncodeToString(idb[:]), u.ID, u.Name, color)
+	readOnly := g != nil && !g.CanEdit
+	// Revalidación periódica: usuario activo o enlace de invitado vigente.
+	valid := func(ctx context.Context) bool {
+		if g != nil {
+			_, err := s.guestFromToken(ctx, tok)
+			return err == nil
+		}
+		u, err := s.userByID(ctx, u.ID)
+		return err == nil && u.Active
+	}
+	if g != nil {
+		peer.Invite = g.InviteID
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go s.wsWriter(ctx, c, peer, u.ID)
+	go s.wsWriter(ctx, c, peer, valid)
 
 	if err := s.hub.Join(p.ID, rel, abs, peer, since); err != nil {
 		msg := "no se pudo abrir el archivo"
@@ -105,6 +123,10 @@ func (s *Server) projectWS(w http.ResponseWriter, r *http.Request) {
 		}
 		switch m.Type {
 		case "push":
+			if readOnly {
+				c.Close(websocket.StatusPolicyViolation, "este enlace de invitado es de solo lectura")
+				return
+			}
 			if err := s.hub.Push(peer, m.Version, m.Updates); err != nil {
 				log.Printf("ws push rechazado (proyecto %d, %s): %v", p.ID, rel, err)
 				c.Close(websocket.StatusPolicyViolation, err.Error())
@@ -123,8 +145,8 @@ func (s *Server) projectWS(w http.ResponseWriter, r *http.Request) {
 }
 
 // wsWriter envía los mensajes del peer, hace ping periódico y revalida que el
-// usuario siga activo.
-func (s *Server) wsWriter(ctx context.Context, c *websocket.Conn, p *collab.Peer, userID int64) {
+// usuario siga activo (o que el enlace del invitado siga vigente).
+func (s *Server) wsWriter(ctx context.Context, c *websocket.Conn, p *collab.Peer, valid func(context.Context) bool) {
 	ping := time.NewTicker(30 * time.Second)
 	defer ping.Stop()
 	for {
@@ -154,7 +176,7 @@ func (s *Server) wsWriter(ctx context.Context, c *websocket.Conn, p *collab.Peer
 				return
 			}
 		case <-ping.C:
-			if u, err := s.userByID(ctx, userID); err != nil || !u.Active {
+			if !valid(ctx) {
 				c.Close(websocket.StatusPolicyViolation, "sesión no válida")
 				return
 			}

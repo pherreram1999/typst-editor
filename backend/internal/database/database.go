@@ -4,140 +4,195 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"log"
+	"net/url"
+	"strings"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
+	"github.com/go-sql-driver/mysql"
+	"github.com/tursodatabase/libsql-client-go/libsql"
 	"golang.org/x/crypto/bcrypt"
 )
 
-func Open(dsn string) (*sql.DB, error) {
-	db, err := sql.Open("mysql", dsn)
-	if err != nil {
-		return nil, err
-	}
-	db.SetMaxOpenConns(20)
-	db.SetMaxIdleConns(5)
-	db.SetConnMaxLifetime(5 * time.Minute)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+// Options elige el motor (DB_DRIVER) y cómo conectarse a él.
+type Options struct {
+	Driver    string // "mysql" (MariaDB) o "libsql" (Bunny Database, Turso, sqld)
+	DSN       string // mysql
+	URL       string // libsql: libsql://…, https://…, http://host:puerto
+	AuthToken string // libsql
+}
+
+// Open conecta con el motor elegido y devuelve su dialecto.
+func Open(o Options) (*sql.DB, Dialect, error) {
+	var (
+		db *sql.DB
+		d  Dialect
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := db.PingContext(ctx); err != nil {
-		return nil, err
+	switch o.Driver {
+	case "mysql":
+		var err error
+		if db, err = sql.Open("mysql", o.DSN); err != nil {
+			return nil, nil, err
+		}
+		// Base inexistente (error 1049): se crea y Migrate pone el esquema.
+		if err := db.PingContext(ctx); isUnknownDB(err) {
+			db.Close()
+			if err := createMySQLDatabase(ctx, o.DSN); err != nil {
+				return nil, nil, err
+			}
+			if db, err = sql.Open("mysql", o.DSN); err != nil {
+				return nil, nil, err
+			}
+		}
+		db.SetMaxOpenConns(20)
+		db.SetMaxIdleConns(5)
+		db.SetConnMaxLifetime(5 * time.Minute)
+		d = mysqlDialect{}
+	case "libsql":
+		var opts []libsql.Option
+		if o.AuthToken != "" {
+			opts = append(opts, libsql.WithAuthToken(o.AuthToken))
+		}
+		inner, err := libsql.NewConnector(o.URL, opts...)
+		if err != nil {
+			return nil, nil, err
+		}
+		// La base de libSQL se crea en el panel del proveedor (Bunny, Turso):
+		// el protocolo no permite crearla. El esquema sí lo crea Migrate.
+		fk, err := detectFK(ctx, inner)
+		if err != nil {
+			return nil, nil, fmt.Errorf("no se pudo conectar con %s (¿existe la base y el token es válido?): %w", redactURL(o.URL), err)
+		}
+		db = sql.OpenDB(&libsqlConnector{inner: inner, pragma: !fk})
+		// Cada conexión es un stream HTTP; el servidor limita cuántos hay abiertos.
+		db.SetMaxOpenConns(10)
+		db.SetMaxIdleConns(5)
+		db.SetConnMaxIdleTime(30 * time.Second)
+		d = libsqlDialect{}
+	default:
+		return nil, nil, fmt.Errorf("DB_DRIVER desconocido: %q (use mysql o libsql)", o.Driver)
 	}
-	return db, nil
+	if err := db.PingContext(ctx); err != nil {
+		db.Close()
+		return nil, nil, err
+	}
+	return db, d, nil
 }
 
-var schema = []string{`CREATE TABLE IF NOT EXISTS users (
-  id            BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  username      VARCHAR(64)  NOT NULL UNIQUE,
-  name          VARCHAR(128) NOT NULL,
-  password_hash VARCHAR(255) NOT NULL,
-  role          ENUM('admin','user') NOT NULL DEFAULT 'user',
-  active        TINYINT(1)   NOT NULL DEFAULT 1,
-  created_at    TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at    TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-	// Cuentas de GitHub (usuario + token) de cada usuario; los proyectos las referencian.
-	`CREATE TABLE IF NOT EXISTS github_accounts (
-  id          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  user_id     BIGINT UNSIGNED NOT NULL,
-  label       VARCHAR(128) NOT NULL DEFAULT '',
-  login       VARCHAR(100) NOT NULL,
-  is_org      TINYINT(1)   NOT NULL DEFAULT 0,
-  token       VARCHAR(512) NOT NULL,
-  created_at  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  UNIQUE KEY uq_github_user_login (user_id, login),
-  CONSTRAINT fk_github_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-	`CREATE TABLE IF NOT EXISTS projects (
-  id          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  name        VARCHAR(128) NOT NULL,
-  main_file   VARCHAR(255) NOT NULL DEFAULT 'main.typ',
-  owner_id    BIGINT UNSIGNED NOT NULL,
-  github_account_id BIGINT UNSIGNED NULL,
-  git_remote  VARCHAR(512) NOT NULL DEFAULT '',
-  git_branch  VARCHAR(128) NOT NULL DEFAULT 'main',
-  is_template          TINYINT(1)   NOT NULL DEFAULT 0,
-  template_category    VARCHAR(64)  NOT NULL DEFAULT '',
-  template_description VARCHAR(255) NOT NULL DEFAULT '',
-  created_at  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  CONSTRAINT fk_projects_owner FOREIGN KEY (owner_id) REFERENCES users(id),
-  CONSTRAINT fk_projects_github FOREIGN KEY (github_account_id) REFERENCES github_accounts(id) ON DELETE SET NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-	// Migración de instalaciones anteriores (el token ya no vive en el proyecto).
-	`ALTER TABLE projects ADD COLUMN IF NOT EXISTS github_account_id BIGINT UNSIGNED NULL AFTER owner_id`,
-	`ALTER TABLE projects ADD CONSTRAINT fk_projects_github FOREIGN KEY IF NOT EXISTS (github_account_id) REFERENCES github_accounts(id) ON DELETE SET NULL`,
-	`ALTER TABLE projects DROP COLUMN IF EXISTS git_token`,
-	// Cuentas de organización: login es la organización, no el dueño del token.
-	`ALTER TABLE github_accounts ADD COLUMN IF NOT EXISTS is_org TINYINT(1) NOT NULL DEFAULT 0 AFTER login`,
-	`ALTER TABLE projects ADD COLUMN IF NOT EXISTS is_template TINYINT(1) NOT NULL DEFAULT 0 AFTER git_branch`,
-	`ALTER TABLE projects ADD COLUMN IF NOT EXISTS template_category VARCHAR(64) NOT NULL DEFAULT '' AFTER is_template`,
-	`ALTER TABLE projects ADD COLUMN IF NOT EXISTS template_description VARCHAR(255) NOT NULL DEFAULT '' AFTER template_category`,
-	// Usuarios invitados a un proyecto (colaboradores con permiso de edición).
-	`CREATE TABLE IF NOT EXISTS project_members (
-  project_id  BIGINT UNSIGNED NOT NULL,
-  user_id     BIGINT UNSIGNED NOT NULL,
-  invited_by  BIGINT UNSIGNED NULL,
-  created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (project_id, user_id),
-  KEY idx_members_user (user_id),
-  CONSTRAINT fk_members_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
-  CONSTRAINT fk_members_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-  CONSTRAINT fk_members_inviter FOREIGN KEY (invited_by) REFERENCES users(id) ON DELETE SET NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-	// Organización personal de cada usuario: carpetas y proyectos destacados.
-	`CREATE TABLE IF NOT EXISTS project_folders (
-  id          BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-  user_id     BIGINT UNSIGNED NOT NULL,
-  name        VARCHAR(64)  NOT NULL,
-  color       VARCHAR(16)  NOT NULL DEFAULT 'blue',
-  created_at  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE KEY uq_folder_user_name (user_id, name),
-  CONSTRAINT fk_folders_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-	`CREATE TABLE IF NOT EXISTS project_user_prefs (
-  user_id     BIGINT UNSIGNED NOT NULL,
-  project_id  BIGINT UNSIGNED NOT NULL,
-  folder_id   BIGINT UNSIGNED NULL,
-  starred     TINYINT(1)   NOT NULL DEFAULT 0,
-  starred_at  TIMESTAMP    NULL,
-  PRIMARY KEY (user_id, project_id),
-  KEY idx_prefs_project (project_id),
-  CONSTRAINT fk_prefs_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-  CONSTRAINT fk_prefs_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
-  CONSTRAINT fk_prefs_folder FOREIGN KEY (folder_id) REFERENCES project_folders(id) ON DELETE SET NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
-	`ALTER TABLE project_folders ADD COLUMN IF NOT EXISTS color VARCHAR(16) NOT NULL DEFAULT 'blue' AFTER name`,
-	// Enlace público de revisión (una compilación guardada por proyecto).
-	`CREATE TABLE IF NOT EXISTS project_reviews (
-  project_id     BIGINT UNSIGNED PRIMARY KEY,
-  token          CHAR(43)     NOT NULL,
-  allow_download TINYINT(1)   NOT NULL DEFAULT 1,
-  created_by     BIGINT UNSIGNED NULL,
-  created_at     TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  compiled_at    TIMESTAMP    NULL,
-  compiled_by    BIGINT UNSIGNED NULL,
-  UNIQUE KEY uq_reviews_token (token),
-  CONSTRAINT fk_reviews_project FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
-  CONSTRAINT fk_reviews_creator FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL,
-  CONSTRAINT fk_reviews_compiler FOREIGN KEY (compiled_by) REFERENCES users(id) ON DELETE SET NULL
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+func isUnknownDB(err error) bool {
+	var me *mysql.MySQLError
+	return errors.As(err, &me) && me.Number == 1049
 }
 
-// Migrate creates the schema and seeds the first administrator if none exists.
-func Migrate(db *sql.DB, adminUser, adminPassword, adminName string) error {
-	for _, stmt := range schema {
-		if _, err := db.Exec(stmt); err != nil {
-			return err
+// createMySQLDatabase crea la base del DSN (utf8mb4, como database/01_setup.sql)
+// conectándose sin base. El usuario necesita el privilegio CREATE.
+func createMySQLDatabase(ctx context.Context, dsn string) error {
+	cfg, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		return err
+	}
+	name := cfg.DBName
+	cfg.DBName = ""
+	conn, err := sql.Open("mysql", cfg.FormatDSN())
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	q := "CREATE DATABASE IF NOT EXISTS `" + strings.ReplaceAll(name, "`", "``") +
+		"` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+	if _, err := conn.ExecContext(ctx, q); err != nil {
+		return fmt.Errorf("la base %q no existe y no se pudo crear (¿el usuario tiene permiso CREATE?): %w", name, err)
+	}
+	log.Printf("base de datos %q creada", name)
+	return nil
+}
+
+// redactURL quita de la URL lo que pueda ser secreto, para los mensajes.
+func redactURL(s string) string {
+	u, err := url.Parse(s)
+	if err != nil {
+		return "la base libSQL"
+	}
+	u.User, u.RawQuery = nil, ""
+	return u.String()
+}
+
+// NullTime lee una fecha que puede ser NULL tanto si el driver la entrega como
+// time.Time (MariaDB, columnas TIMESTAMP de libSQL) como si llega como texto
+// (expresiones en libSQL: MAX(…), COALESCE(…)). Siempre en UTC.
+type NullTime struct {
+	Time  time.Time
+	Valid bool
+}
+
+var timeLayouts = []string{
+	"2006-01-02 15:04:05.999999999-07:00",
+	"2006-01-02T15:04:05.999999999-07:00",
+	"2006-01-02 15:04:05.999999999",
+	"2006-01-02T15:04:05.999999999Z07:00",
+	"2006-01-02T15:04:05.999999999",
+	"2006-01-02",
+}
+
+func (n *NullTime) Scan(v any) error {
+	n.Time, n.Valid = time.Time{}, false
+	var s string
+	switch t := v.(type) {
+	case nil:
+		return nil
+	case time.Time:
+		n.Time, n.Valid = t.UTC(), true
+		return nil
+	case string:
+		s = t
+	case []byte:
+		s = string(t)
+	default:
+		return fmt.Errorf("fecha no válida: %T", v)
+	}
+	for _, l := range timeLayouts {
+		if t, err := time.ParseInLocation(l, s, time.UTC); err == nil {
+			n.Time, n.Valid = t.UTC(), true
+			return nil
 		}
 	}
+	return fmt.Errorf("fecha no válida: %q", s)
+}
+
+// Migrate crea y migra el esquema (idempotente: se ejecuta en cada arranque,
+// también en Docker) y crea el primer administrador si no hay ninguno. Con
+// adminEmail, además se lo asigna al administrador adminUser si aún no tiene
+// correo (instalaciones anteriores al inicio de sesión por correo).
+func Migrate(db *sql.DB, d Dialect, adminUser, adminPassword, adminName, adminEmail string) error {
+	for _, stmt := range d.Schema() {
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("esquema (%s): %w", d.Name(), err)
+		}
+	}
+	if d.Name() == "libsql" {
+		if err := migrateLibSQL(db); err != nil {
+			return fmt.Errorf("esquema (%s): %w", d.Name(), err)
+		}
+	}
+	log.Printf("esquema de la base de datos al día (%s)", d.Name())
 	var n int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM users WHERE role='admin'`).Scan(&n); err != nil {
 		return err
 	}
 	if n > 0 {
+		if adminEmail != "" {
+			res, err := db.Exec(`UPDATE users SET email = ? WHERE username = ? AND role = 'admin' AND (email IS NULL OR email = '')
+  AND NOT EXISTS (SELECT 1 FROM (SELECT id FROM users WHERE email = ?) x)`, adminEmail, adminUser, adminEmail)
+			if err != nil {
+				return fmt.Errorf("correo del administrador: %w", err)
+			}
+			if k, _ := res.RowsAffected(); k > 0 {
+				log.Printf("correo %s asignado al administrador %q", adminEmail, adminUser)
+			}
+		}
 		return nil
 	}
 	if len(adminPassword) < 8 {
@@ -147,8 +202,12 @@ func Migrate(db *sql.DB, adminUser, adminPassword, adminName string) error {
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`INSERT INTO users (username, name, password_hash, role) VALUES (?, ?, ?, 'admin')`,
-		adminUser, adminName, string(hash))
+	var email any
+	if adminEmail != "" {
+		email = adminEmail
+	}
+	_, err = db.Exec(`INSERT INTO users (username, email, name, password_hash, role) VALUES (?, ?, ?, ?, 'admin')`,
+		adminUser, email, adminName, string(hash))
 	if err == nil {
 		log.Printf("administrador inicial %q creado", adminUser)
 	}

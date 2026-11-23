@@ -27,7 +27,10 @@
   import { api } from '../api.js'
   import { BrowserCompiler } from '../preview/engine.js'
 
-  let { projectId, refreshKey, remoteKey = 0, livePath = '', liveVersion = 0, liveText = () => null, active = true, onresult, onjump } = $props()
+  // browser=false: compilar siempre en el servidor (celulares: el compilador
+  // del navegador descarga ~11 MB y puede ocupar más de 1 GB de memoria).
+  // compact: barra mínima y márgenes estrechos (pantallas pequeñas).
+  let { projectId, refreshKey, remoteKey = 0, livePath = '', liveVersion = 0, liveText = () => null, active = true, browser = true, compact = false, onresult, onjump } = $props()
 
   const FETCH_MARGIN = '150% 0px' // se descargan páginas hasta 1,5 pantallas más allá
   const MOUNT_MARGIN = '50% 0px' // y se muestran hasta media pantalla más allá
@@ -58,7 +61,8 @@
   let destroyed = false
 
   // Compilador del navegador ('local') o del servidor ('server').
-  let mode = $state(typeof Worker !== 'undefined' && typeof WebAssembly !== 'undefined' ? 'local' : 'server')
+  // `browser` solo cuenta al montar: el modo no cambia después (salvo fallback).
+  let mode = $state(untrack(() => browser) && typeof Worker !== 'undefined' && typeof WebAssembly !== 'undefined' ? 'local' : 'server')
   let engine = null
   let engineReady = null
   let preparing = $state(false) // el compilador del navegador aún no ha compilado
@@ -280,6 +284,18 @@
     return syncLoading
   }
 
+  // Bloque del código que empieza en la página i (base 0) a la altura y (en
+  // unidades de la página) o justo antes.
+  function pointAt(points, i, y) {
+    const page = i + 1
+    let best = null
+    for (const p of points) {
+      const before = p.page < page || (p.page === page && p.y <= y + 4)
+      if (before && (!best || p.page > best.page || (p.page === best.page && p.y >= best.y))) best = p
+    }
+    return best ?? points.find((p) => p.page === page) ?? null
+  }
+
   // Clic en una página: el último bloque que empieza antes del clic.
   async function clickPage(e, i) {
     if (!onjump || !pages[i] || moved) return
@@ -293,14 +309,34 @@
       error = err.status === 422 ? '' : err.message
       return
     }
-    const page = i + 1
-    let best = null
-    for (const p of s.points) {
-      const before = p.page < page || (p.page === page && p.y <= y + 4)
-      if (before && (!best || p.page > best.page || (p.page === best.page && p.y >= best.y))) best = p
-    }
-    best ??= s.points.find((p) => p.page === page)
+    const best = pointAt(s.points, i, y)
     if (best) onjump({ file: best.file, line: best.line, column: best.col })
+  }
+
+  // Lo que se está leyendo: el bloque a un tercio de la altura visible
+  // ({file, line, column} o null). Sirve para abrir el editor en ese punto.
+  export async function sourceAtView() {
+    if (!pages.length || !scroller) return null
+    const sr = scroller.getBoundingClientRect()
+    const cy = sr.top + sr.height / 3
+    let node = null
+    let best = Infinity
+    for (const n of nodes) {
+      const r = n.getBoundingClientRect()
+      const d = cy < r.top ? r.top - cy : cy > r.bottom ? cy - r.bottom : 0
+      if (d < best) [best, node] = [d, n]
+    }
+    if (!node) return null
+    const i = Number(node.dataset.i)
+    const r = node.getBoundingClientRect()
+    const y = (Math.min(Math.max(cy - r.top, 0), r.height) / r.height) * pages[i].height
+    syncUsed = true
+    try {
+      const p = pointAt((await ensureSync()).points, i, y)
+      return p ? { file: p.file, line: p.line, column: p.col } : null
+    } catch {
+      return null
+    }
   }
 
   // Lleva la vista al bloque de file:line (el último que empieza en esa línea
@@ -391,6 +427,45 @@
     if (!el) return
     el.addEventListener('wheel', onWheel, { passive: false })
     return () => el.removeEventListener('wheel', onWheel)
+  })
+
+  // Pellizco con dos dedos (pantallas táctiles): zoom alrededor del punto
+  // medio. touch-action en el visor impide que el navegador amplíe la página
+  // entera; el desplazamiento con un dedo sigue siendo el nativo.
+  let pinch = null
+  function touchDist(t) {
+    return Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY)
+  }
+  function onTouchStart(e) {
+    if (e.touches.length !== 2) return
+    pinch = { d: touchDist(e.touches) || 1, zoom }
+    moved = true // el toque que termina el gesto no salta al código
+  }
+  function onTouchMove(e) {
+    if (!pinch || e.touches.length !== 2) return
+    e.preventDefault()
+    const [a, b] = e.touches
+    setZoom(pinch.zoom * (touchDist(e.touches) / pinch.d), (a.clientX + b.clientX) / 2, (a.clientY + b.clientY) / 2)
+  }
+  function onTouchEnd(e) {
+    if (pinch && e.touches.length < 2) {
+      pinch = null
+      setTimeout(() => (moved = false), 50)
+    }
+  }
+  $effect(() => {
+    const el = scroller
+    if (!el) return
+    el.addEventListener('touchstart', onTouchStart, { passive: true })
+    el.addEventListener('touchmove', onTouchMove, { passive: false })
+    el.addEventListener('touchend', onTouchEnd)
+    el.addEventListener('touchcancel', onTouchEnd)
+    return () => {
+      el.removeEventListener('touchstart', onTouchStart)
+      el.removeEventListener('touchmove', onTouchMove)
+      el.removeEventListener('touchend', onTouchEnd)
+      el.removeEventListener('touchcancel', onTouchEnd)
+    }
   })
 
   // + / − / 0 con la vista previa enfocada (también con Ctrl, sin que el
@@ -657,11 +732,18 @@
         {/if}
       {/if}
     </div>
+    {#if compact}
+      <!-- En el celular el zoom es con dos dedos; aquí solo se restablece. -->
+      {#if zoom !== 100}
+        <button type="button" class="btn-secondary btn-sm !h-7 !px-2 tabular-nums" onclick={() => setZoom(100)} aria-label="Restablecer el zoom">{zoom}% · 100%</button>
+      {/if}
+    {:else}
     <div class="flex items-center gap-1">
       <button type="button" class="btn-secondary btn-sm !h-7 !px-2" onclick={() => setZoom(zoom - 10)} aria-label="Alejar">−</button>
       <button type="button" class="w-12 cursor-pointer text-center tabular-nums text-slate-600" onclick={() => setZoom(100)} title="Restablecer (0)">{zoom}%</button>
       <button type="button" class="btn-secondary btn-sm !h-7 !px-2" onclick={() => setZoom(zoom + 10)} aria-label="Acercar">+</button>
     </div>
+    {/if}
   </div>
 
   {#if error}
@@ -674,7 +756,7 @@
   <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
   <div
     bind:this={scroller}
-    class="min-h-0 flex-1 overflow-auto bg-slate-200/70 p-4 outline-none select-none {dragging ? 'cursor-grabbing' : 'cursor-grab'}"
+    class="min-h-0 flex-1 touch-pan-x touch-pan-y overflow-auto overscroll-contain bg-slate-200/70 outline-none select-none {compact ? 'p-2 pb-24' : 'p-4'} {dragging ? 'cursor-grabbing' : 'cursor-grab'}"
     tabindex="0"
     role="region"
     aria-label="Vista previa (Ctrl + rueda o +/− para hacer zoom; arrastra para moverte)"
@@ -684,7 +766,7 @@
     onpointerup={onPointerUp}
     onpointercancel={onPointerUp}
   >
-    <div class="mx-auto flex flex-col items-center gap-4" style="width: {zoom}%">
+    <div class="mx-auto flex flex-col items-center {compact ? 'gap-2' : 'gap-4'}" style="width: {zoom}%">
       {#each pages as pg, i (i)}
         {@const src = urls.get(pg.hash) ?? stale[i]}
         <div

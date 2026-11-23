@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -36,6 +37,7 @@ type Peer struct {
 	UserID int64
 	Name   string
 	Color  string
+	Invite int64       // enlace de invitación con el que entró (0: usuario con cuenta)
 	Send   chan []byte // mensajes salientes; lo consume el escritor de la conexión
 	Closed chan struct{}
 	once   sync.Once
@@ -377,6 +379,156 @@ func (h *Hub) ReplaceText(projectID int64, path, content string) {
 	}
 }
 
+// ErrNoChange lo devuelve la función de EditText para no escribir nada.
+var ErrNoChange = errors.New("sin cambios")
+
+// EditText modifica el texto de un archivo editable aplicando fn al contenido
+// actual, esté o no abierto en el editor. Es la vía para que el servidor (p.
+// ej. las herramientas MCP) edite sin pisar a los colaboradores:
+//   - abierto: el cambio se aplica al documento en memoria como una
+//     actualización del servidor (los clientes la reciben y transforman sus
+//     cambios pendientes) y se guarda con el retardo habitual;
+//   - cerrado: se lee del disco y se escribe atómicamente sin soltar el lock
+//     del hub, así un Join simultáneo no carga un estado intermedio.
+//
+// Con create, un archivo inexistente cuenta como vacío y se crea (con sus
+// carpetas). Devuelve el texto final y si el archivo se creó. Si fn devuelve
+// ErrNoChange no se escribe nada y el resultado es el texto actual.
+func (h *Hub) EditText(projectID int64, path, abs string, create bool, fn func(old string) (string, error)) (string, bool, error) {
+	h.mu.Lock()
+	d := h.docs[key(projectID, path)]
+	if d == nil {
+		text, wrote, created, err := h.editClosedLocked(abs, create, fn)
+		h.mu.Unlock()
+		if err != nil {
+			return "", false, err
+		}
+		if wrote {
+			h.bumpRev(projectID, created, path)
+		}
+		return text, created, nil
+	}
+	d.mu.Lock()
+	h.mu.Unlock()
+	if d.closed || d.deleted {
+		d.mu.Unlock()
+		return "", false, errors.New("documento cerrado; vuelve a intentarlo")
+	}
+	cur := decode(d.text)
+	next, err := fn(cur)
+	if errors.Is(err, ErrNoChange) {
+		d.mu.Unlock()
+		return cur, false, nil
+	}
+	if err != nil {
+		d.mu.Unlock()
+		return "", false, err
+	}
+	nu := encode(next)
+	if len(nu) > MaxDocSize {
+		d.mu.Unlock()
+		return "", false, ErrTooLarge
+	}
+	cs := diffChangeSet(d.text, nu)
+	if cs == nil {
+		d.mu.Unlock()
+		return cur, false, nil
+	}
+	upd := []Update{{ClientID: "server", Changes: cs}}
+	v := d.version()
+	d.text = nu
+	d.appendLocked(upd)
+	msg := mustJSON(map[string]any{"type": "updates", "version": v, "updates": upd})
+	for q := range d.peers {
+		q.send(msg)
+	}
+	d.scheduleSaveLocked()
+	d.mu.Unlock()
+	h.bumpRev(projectID, false, path)
+	return decode(nu), false, nil
+}
+
+// editClosedLocked es EditText para un archivo que no está abierto (con h.mu
+// tomado). wrote indica si se escribió el archivo.
+func (h *Hub) editClosedLocked(abs string, create bool, fn func(string) (string, error)) (text string, wrote, created bool, err error) {
+	old, err := LoadText(abs)
+	if errors.Is(err, os.ErrNotExist) && create {
+		old, created = nil, true
+	} else if err != nil {
+		return "", false, false, err
+	}
+	next, err := fn(decode(old))
+	switch {
+	case errors.Is(err, ErrNoChange) && !created:
+		return decode(old), false, false, nil
+	case errors.Is(err, ErrNoChange):
+		next = ""
+	case err != nil:
+		return "", false, false, err
+	}
+	u := encode(next)
+	if len(u) > MaxDocSize {
+		return "", false, false, ErrTooLarge
+	}
+	if !created && slices.Equal(u, old) {
+		return decode(old), false, false, nil
+	}
+	if created {
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			return "", false, false, err
+		}
+	}
+	text = decode(u)
+	if err := writeAtomic(abs, []byte(text)); err != nil {
+		return "", false, false, err
+	}
+	return text, true, created, nil
+}
+
+// Text devuelve el texto en memoria de un documento abierto (puede ir por
+// delante del disco).
+func (h *Hub) Text(projectID int64, path string) (string, bool) {
+	h.mu.Lock()
+	d := h.docs[key(projectID, path)]
+	h.mu.Unlock()
+	if d == nil {
+		return "", false
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return "", false
+	}
+	return decode(d.text), true
+}
+
+// SaveAndClose guarda un documento abierto y lo cierra notificando a sus
+// peers (p. ej. antes de renombrar el archivo). Un Join posterior lee el disco.
+func (h *Hub) SaveAndClose(projectID int64, path, reason string) {
+	h.mu.Lock()
+	d := h.docs[key(projectID, path)]
+	delete(h.docs, key(projectID, path))
+	if d == nil {
+		h.mu.Unlock()
+		return
+	}
+	d.mu.Lock()
+	h.mu.Unlock()
+	d.saveLocked()
+	d.closed = true
+	d.deleted = true
+	if d.timer != nil {
+		d.timer.Stop()
+	}
+	peers := d.peers
+	d.mu.Unlock()
+	msg := mustJSON(map[string]any{"type": "closed", "reason": reason})
+	for q := range peers {
+		q.send(msg)
+		q.Kick()
+	}
+}
+
 // CloseDoc cierra un documento (archivo borrado) notificando a sus peers.
 func (h *Hub) CloseDoc(projectID int64, path, reason string) {
 	h.mu.Lock()
@@ -410,11 +562,17 @@ func (h *Hub) CloseProject(projectID int64, reason string) {
 
 // KickUser cierra las sesiones de un usuario en un proyecto (acceso revocado).
 func (h *Hub) KickUser(projectID, userID int64, reason string) {
+	h.KickPeers(projectID, func(p *Peer) bool { return p.UserID == userID }, reason)
+}
+
+// KickPeers cierra, avisando de que perdieron el acceso, las sesiones del
+// proyecto que cumplen match (p. ej. las de un enlace de invitado revocado).
+func (h *Hub) KickPeers(projectID int64, match func(*Peer) bool, reason string) {
 	msg := mustJSON(map[string]any{"type": "closed", "reason": reason, "revoked": true})
 	for _, d := range h.projectDocs(projectID) {
 		d.mu.Lock()
 		for p := range d.peers {
-			if p.UserID == userID {
+			if match(p) {
 				p.send(msg)
 				p.Kick()
 			}

@@ -5,6 +5,8 @@
   import { session } from '../session.svelte.js'
   import Modal from '../Modal.svelte'
   import ReviewShare from './ReviewShare.svelte'
+  import InviteLinks from './InviteLinks.svelte'
+  import { downloadPdf, downloadZip, pdfError } from './exporting.js'
 
   let { open, project, canManage, onclose, refreshKey = 0 } = $props()
 
@@ -18,11 +20,18 @@
   let busy = $state(false)
   let searchTimer
   let searchSeq = 0
+  // Invitaciones por correo sin aceptar y, si no salió el correo, el enlace para copiarlo.
+  let emailInvites = $state([])
+  let manualLink = $state(null) // { email, link }
+  let copied = $state(false)
 
   async function load() {
     loading = true
     try {
-      members = await api.listMembers(project.id)
+      ;[members, emailInvites] = await Promise.all([
+        api.listMembers(project.id),
+        canManage ? api.listEmailInvites(project.id) : Promise.resolve([]),
+      ])
     } catch (e) {
       error = e.message
     } finally {
@@ -41,6 +50,7 @@
       results = []
       error = ''
       notice = ''
+      manualLink = null
     }
   })
 
@@ -67,13 +77,20 @@
     }, 200)
   }
 
-  async function invite(username) {
+  // who: usuario o correo. Un correo sin cuenta recibe una invitación firmada.
+  async function invite(who) {
     error = ''
     notice = ''
+    manualLink = null
     busy = true
     try {
-      await api.addMember(project.id, username)
-      notice = `«${username}» ahora puede editar este proyecto.`
+      const r = await api.addMember(project.id, who)
+      if (r?.added) {
+        notice = `${r.added.name} (${r.added.username}) ahora puede editar este proyecto.${r.notified ? ' Le avisamos por correo.' : ''}`
+      } else if (r?.invited) {
+        if (r.mail_sent) notice = `Enviamos una invitación a ${r.invited.email}. Al aceptarla creará su cuenta y entrará al proyecto.`
+        else manualLink = { email: r.invited.email, link: r.link, reason: r.mail_error }
+      }
       query = ''
       results = []
       await load()
@@ -87,8 +104,9 @@
   function submit(e) {
     e.preventDefault()
     const pick = results.filter((u) => !memberIds.has(u.id))[highlighted]
-    const username = pick?.username ?? query.trim()
-    if (username) invite(username)
+    // Un correo escrito se usa tal cual (no la sugerencia resaltada).
+    const who = query.includes('@') ? query.trim() : (pick?.username ?? query.trim())
+    if (who) invite(who)
   }
 
   function onKeydown(e) {
@@ -122,32 +140,55 @@
     }
   }
 
+  // ---------- invitaciones por correo ----------
+  async function resendInvite(inv) {
+    error = ''
+    notice = ''
+    manualLink = null
+    try {
+      const r = await api.resendEmailInvite(project.id, inv.id)
+      if (r.mail_sent) notice = `Reenviamos la invitación a ${inv.email}.`
+      else manualLink = { email: inv.email, link: r.link, reason: r.mail_error }
+      await load()
+    } catch (e) {
+      error = e.message
+    }
+  }
+
+  async function cancelInvite(inv) {
+    if (!confirm(`¿Anular la invitación a ${inv.email}? El enlace que recibió dejará de funcionar.`)) return
+    error = ''
+    try {
+      await api.deleteEmailInvite(project.id, inv.id)
+      emailInvites = emailInvites.filter((x) => x.id !== inv.id)
+    } catch (e) {
+      error = e.message
+    }
+  }
+
+  async function copyManual() {
+    try {
+      await navigator.clipboard.writeText(manualLink.link)
+      copied = true
+      setTimeout(() => (copied = false), 2000)
+    } catch {
+      /* el campo queda seleccionable */
+    }
+  }
+
+  const fmtShort = (d) => new Date(d).toLocaleDateString('es-MX', { day: 'numeric', month: 'short' })
+
   // ---------- exportar ----------
   let exporting = $state('') // '' | 'pdf' | 'zip'
-
-  // Descarga un archivo con el gestor de descargas del navegador.
-  function download(href, filename) {
-    const a = document.createElement('a')
-    a.href = href
-    if (filename) a.download = filename
-    document.body.append(a)
-    a.click()
-    a.remove()
-  }
 
   async function exportPdf() {
     error = ''
     notice = ''
     exporting = 'pdf'
     try {
-      const { blob } = await api.pdf(project.id)
-      const href = URL.createObjectURL(blob)
-      download(href, `${project.name.replace(/[\\/:*?"<>|]+/g, '-').trim() || 'documento'}.pdf`)
-      setTimeout(() => URL.revokeObjectURL(href), 60000)
+      await downloadPdf(project)
     } catch (e) {
-      error = e.data?.diagnostics
-        ? 'El documento tiene errores y no se pudo generar el PDF. Revísalos en el panel «Problemas».'
-        : e.message
+      error = pdfError(e)
     } finally {
       exporting = ''
     }
@@ -158,8 +199,7 @@
     notice = ''
     exporting = 'zip'
     try {
-      // El servidor arma el .zip mientras lo envía: la descarga sigue en el navegador.
-      download(await api.exportZipURL(project.id))
+      await downloadZip(project)
       notice = 'La descarga del proyecto comenzó en el navegador.'
     } catch (e) {
       error = e.message
@@ -179,14 +219,16 @@
 
     {#if canManage}
       <form class="relative flex gap-2" onsubmit={submit} autocomplete="off">
-        <label class="sr-only" for="invite-user">Usuario a invitar</label>
+        <label class="sr-only" for="invite-user">Usuario o correo a invitar</label>
         <input
           id="invite-user"
           class="input"
           bind:value={query}
           oninput={onInput}
           onkeydown={onKeydown}
-          placeholder="Buscar por usuario o nombre…"
+          type="text"
+          inputmode="email"
+          placeholder="Usuario, nombre o correo electrónico…"
           role="combobox"
           aria-expanded={suggestions.length > 0}
           aria-controls="invite-suggestions"
@@ -214,9 +256,23 @@
           </ul>
         {/if}
       </form>
+      {#if manualLink}
+        <div class="-mt-1 flex flex-col gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3">
+          <p class="text-xs text-amber-900">
+            No se envió el correo{manualLink.reason ? ` (${manualLink.reason})` : ''}. Comparte este enlace con
+            <strong>{manualLink.email}</strong>: con él crea su cuenta y entra al proyecto (vence en 14 días).
+          </p>
+          <div class="flex gap-2">
+            <label class="sr-only" for="manual-link">Enlace de invitación</label>
+            <input id="manual-link" class="input font-mono !text-xs" readonly value={manualLink.link} onfocus={(e) => e.currentTarget.select()} />
+            <button type="button" class="btn-primary btn-sm shrink-0 !h-10" onclick={copyManual}>{copied ? '¡Copiado!' : 'Copiar'}</button>
+          </div>
+        </div>
+      {/if}
       <p class="-mt-2 text-xs text-slate-500">
-        Los invitados pueden editar, compilar y hacer pull/push con la configuración de GitHub del proyecto. Solo tú
-        (o un administrador) puede cambiar los ajustes e invitar.
+        Con un correo sin cuenta se envía una invitación para registrarse; a los usuarios registrados se les avisa por correo.
+        Los invitados pueden editar y compilar. Solo tú (o un administrador) puedes cambiar los ajustes e invitar, y
+        solo tú, como propietario, puedes hacer pull y push.
       </p>
     {/if}
 
@@ -254,7 +310,29 @@
           {/each}
         </ul>
       {/if}
+      {#if emailInvites.length}
+        <p class="mt-3 mb-1 text-xs font-semibold tracking-wide text-slate-500 uppercase">Invitaciones pendientes</p>
+        <ul class="flex flex-col divide-y divide-slate-100">
+          {#each emailInvites as inv (inv.id)}
+            <li class="flex items-center gap-3 py-2 {inv.expired ? 'opacity-60' : ''}">
+              <span class="flex size-8 shrink-0 items-center justify-center rounded-full bg-slate-100 text-slate-500" aria-hidden="true">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2" /><path d="m3 7 9 6 9-6" /></svg>
+              </span>
+              <div class="min-w-0 flex-1">
+                <p class="truncate text-sm font-medium">{inv.email}</p>
+                <p class="truncate text-xs text-slate-500">
+                  {inv.expired ? 'Caducada' : `Vence el ${fmtShort(inv.expires_at)}`}{#if inv.invited_by}{' · '}invitado por {inv.invited_by}{/if}
+                </p>
+              </div>
+              <button type="button" class="btn-secondary btn-sm !h-8 shrink-0" onclick={() => resendInvite(inv)}>Reenviar</button>
+              <button type="button" class="btn-secondary btn-sm !h-8 shrink-0 !text-red-700" onclick={() => cancelInvite(inv)}>Anular</button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
     </div>
+
+    {#if canManage}<InviteLinks {project} {open} />{/if}
 
     <ReviewShare {project} {open} />
 

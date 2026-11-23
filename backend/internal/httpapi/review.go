@@ -140,12 +140,13 @@ func (s *Server) publishReview(w http.ResponseWriter, r *http.Request) {
 	if req.AllowDownload != nil {
 		allow = *req.AllowDownload
 	}
+	d := s.dialect
 	_, err = s.db.ExecContext(r.Context(), `
 INSERT INTO project_reviews (project_id, token, allow_download, created_by, compiled_at, compiled_by)
-VALUES (?, ?, ?, ?, UTC_TIMESTAMP(), ?)
-ON DUPLICATE KEY UPDATE compiled_at = UTC_TIMESTAMP(), compiled_by = VALUES(compiled_by),
-  allow_download = IF(?, VALUES(allow_download), allow_download)`,
-		p.ID, newReviewToken(), allow, u.ID, u.ID, req.AllowDownload != nil)
+VALUES (?, ?, ?, ?, ?, ?)
+`+d.OnConflict("project_id")+` compiled_at = `+d.Excluded("compiled_at")+`, compiled_by = `+d.Excluded("compiled_by")+`,
+  allow_download = CASE WHEN ? THEN `+d.Excluded("allow_download")+` ELSE allow_download END`,
+		p.ID, newReviewToken(), allow, u.ID, time.Now(), u.ID, req.AllowDownload != nil)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "no se pudo guardar el enlace de revisión")
 		return

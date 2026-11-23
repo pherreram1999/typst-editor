@@ -1,12 +1,18 @@
 <script>
   import { session, clearSession } from './session.svelte.js'
   import { theme, setTheme, THEMES } from './theme.svelte.js'
+  import Modal from './Modal.svelte'
+  import ChangePassword from './ChangePassword.svelte'
+
+  let passwordOpen = $state(false)
+  let passwordDone = $state(false)
 
   let { path } = $props()
 
   const links = $derived([
     { href: '#/', label: 'Proyectos', active: path === '/' || path.startsWith('/p/') },
     { href: '#/github', label: 'GitHub', active: path === '/github' },
+    { href: '#/mcp', label: 'Agentes', active: path === '/mcp' },
     ...(session.user?.role === 'admin'
       ? [{ href: '#/usuarios', label: 'Usuarios', active: path === '/usuarios' }]
       : []),
@@ -24,7 +30,7 @@
 <nav class="bg-nav text-white">
   <div class="flex min-h-14 flex-wrap items-center justify-between gap-3 px-6">
     <div class="flex flex-wrap items-center gap-6">
-      <span class="text-[17px] font-bold">Typst Editor</span>
+      <span class="text-[17px] font-bold">Typst Extend</span>
       {#each links as l}
         <a
           href={l.href}
@@ -65,7 +71,12 @@
         class="flex size-8 items-center justify-center rounded-full bg-primary-soft text-xs font-bold text-primary"
         aria-hidden="true">{initials(session.user?.name ?? '')}</span
       >
-      <span class="hidden text-sm text-white/80 sm:inline" title={session.user?.username}>{session.user?.name}</span>
+      <button
+        type="button"
+        class="hidden cursor-pointer text-sm text-white/80 hover:text-white hover:underline sm:inline"
+        title="{session.user?.username}{session.user?.email ? ` · ${session.user.email}` : ''} — cambiar contraseña"
+        onclick={() => ((passwordDone = false), (passwordOpen = true))}>{session.user?.name}</button
+      >
       <button
         type="button"
         onclick={logout}
@@ -75,3 +86,14 @@
     </div>
   </div>
 </nav>
+
+<Modal open={passwordOpen} title="Cambiar contraseña" onclose={() => (passwordOpen = false)}>
+  {#if passwordDone}
+    <div class="flex flex-col gap-4">
+      <div class="alert-info">Tu contraseña se cambió.</div>
+      <div class="flex justify-end"><button type="button" class="btn-secondary" onclick={() => (passwordOpen = false)}>Cerrar</button></div>
+    </div>
+  {:else}
+    <ChangePassword ondone={() => (passwordDone = true)} />
+  {/if}
+</Modal>

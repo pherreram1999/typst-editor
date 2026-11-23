@@ -49,3 +49,16 @@ export function drawerIn() {
 export function drawerOut() {
   return { duration: d(180), css: (t, u) => `transform: translateX(${u * 100}%)` }
 }
+
+// Hoja inferior (celular): sube desde el borde de abajo.
+export function sheetIn() {
+  return {
+    duration: d(240),
+    easing: cubicOut,
+    css: (t, u) => `transform: translateY(${u * 100}%)`,
+  }
+}
+
+export function sheetOut() {
+  return { duration: d(160), css: (t, u) => `transform: translateY(${u * 100}%)` }
+}

@@ -196,7 +196,7 @@ html[data-theme="solarized"] {
     @apply text-[13px] font-medium text-slate-700;
   }
   .input {
-    @apply h-11 w-full rounded-lg border border-slate-300 bg-surface px-3 text-sm text-slate-900 placeholder:text-slate-400
+    @apply h-11 w-full rounded-lg border border-slate-300 bg-surface px-3 text-sm text-slate-900 placeholder:text-slate-400 pointer-coarse:text-base
       focus:border-primary focus:outline-none focus:ring-4 focus:ring-primary-soft;
   }
   .card {
@@ -210,5 +210,14 @@ html[data-theme="solarized"] {
   }
   .alert-info {
     @apply rounded-lg border border-blue-200 bg-primary-tint px-4 py-3 text-sm text-blue-900;
+  }
+}
+
+/* Pantallas táctiles: iOS amplía la página al enfocar un campo con letra de
+   menos de 16 px (también el editor, que es contenteditable). */
+@media (pointer: coarse) {
+  .cm-editor .cm-content,
+  .cm-editor .cm-gutters {
+    font-size: 16px;
   }
 }

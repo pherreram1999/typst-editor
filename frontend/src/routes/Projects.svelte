@@ -7,10 +7,12 @@
   import Modal from '../lib/Modal.svelte'
   import RepoPicker from '../lib/RepoPicker.svelte'
   import Thumb from '../lib/Thumb.svelte'
+  import ImportPicker from '../lib/ImportPicker.svelte'
 
   // mode: 'github' (cargar un repositorio) | 'empty' (proyecto nuevo con plantilla)
   // mode 'template': copiar una plantilla
-  const empty = (mode) => ({ name: '', mode, account: null, git_remote: '', git_branch: 'main', nameTouched: false, template: null })
+  const empty = (mode) => ({ name: '', mode, account: null, git_remote: '', git_branch: 'main', nameTouched: false, template: null, upload: null })
+  let importProgress = $state(null) // 0…1 mientras se sube un proyecto importado
   let templates = $state([])
   let templateCategory = $state('') // filtro de la galería ('' = todas)
   let accounts = $state([])
@@ -335,6 +337,18 @@
         location.hash = `#/p/${p.id}`
         return
       }
+      if (form.mode === 'import') {
+        if (!form.upload) {
+          error = 'Elige un .zip o una carpeta.'
+          return
+        }
+        importProgress = 0
+        const p = await api.importProject(form.name.trim(), form.upload, (x) => (importProgress = x))
+        modalOpen = false
+        setView('own')
+        location.hash = `#/p/${p.id}`
+        return
+      }
       const body = { name: form.name }
       if (form.mode === 'github') {
         if (!form.git_remote) {
@@ -353,6 +367,7 @@
       error = e.message
     } finally {
       saving = false
+      importProgress = null
     }
   }
 
@@ -1017,13 +1032,14 @@
   <form class="flex flex-col gap-4" onsubmit={submit}>
     {#if error}<div class="alert-error">{error}</div>{/if}
 
-    <div class="grid grid-cols-3 gap-1 rounded-lg bg-slate-100 p-1" role="tablist">
-      {#each [['template', 'Desde plantilla'], ['github', 'Desde GitHub'], ['empty', 'Vacío (carta)']] as [k, label]}
+    <div class="grid grid-cols-2 gap-1 rounded-lg bg-slate-100 p-1 sm:grid-cols-4" role="tablist">
+      {#each [['template', 'Desde plantilla'], ['github', 'Desde GitHub'], ['import', 'Desde mi equipo'], ['empty', 'Vacío (carta)']] as [k, label]}
         <button
           type="button"
           role="tab"
           aria-selected={form.mode === k}
           class="h-9 cursor-pointer rounded-md text-sm font-medium {form.mode === k ? 'bg-surface text-primary shadow-sm' : 'text-slate-600 hover:text-slate-900'}"
+          disabled={saving}
           onclick={() => (form.mode = k)}>{label}</button
         >
       {/each}
@@ -1069,6 +1085,10 @@
       />
     {/if}
 
+    {#if form.mode === 'import'}
+      <ImportPicker bind:selection={form.upload} disabled={saving} onname={(n) => !form.nameTouched && (form.name = n)} />
+    {/if}
+
     <label class="flex flex-col gap-1.5">
       <span class="label">Nombre del proyecto</span>
       <input
@@ -1077,14 +1097,23 @@
         oninput={() => (form.nameTouched = true)}
         required
         maxlength="128"
-        placeholder={form.mode === 'github' ? 'Se rellena al elegir el repositorio' : form.mode === 'template' ? 'Ej. Carátula — Informe final' : 'Mi informe'}
+        placeholder={form.mode === 'github' ? 'Se rellena al elegir el repositorio' : form.mode === 'import' ? 'Se rellena al elegir el .zip o la carpeta' : form.mode === 'template' ? 'Ej. Carátula — Informe final' : 'Mi informe'}
       />
     </label>
 
+    {#if importProgress != null}
+      <div class="flex flex-col gap-1" role="status">
+        <div class="h-2 overflow-hidden rounded-full bg-slate-200">
+          <div class="h-full bg-violet-600 transition-[width]" style="width: {Math.round(importProgress * 100)}%"></div>
+        </div>
+        <p class="text-xs text-slate-500">{importProgress < 1 ? `Subiendo… ${Math.round(importProgress * 100)} %` : 'Creando el proyecto…'}</p>
+      </div>
+    {/if}
+
     <div class="flex justify-end gap-2 pt-2">
       <button type="button" class="btn-secondary" onclick={() => (modalOpen = false)} disabled={saving}>Cancelar</button>
-      <button class="btn-primary" disabled={saving || (form.mode === 'github' && !accounts.length) || (form.mode === 'template' && !form.template)}>
-        {saving ? (form.mode === 'github' ? 'Cargando repositorio…' : 'Creando…') : form.mode === 'github' ? 'Cargar proyecto' : 'Crear'}
+      <button class="btn-primary" disabled={saving || (form.mode === 'github' && !accounts.length) || (form.mode === 'template' && !form.template) || (form.mode === 'import' && !form.upload)}>
+        {saving ? (form.mode === 'github' ? 'Cargando repositorio…' : form.mode === 'import' ? 'Importando…' : 'Creando…') : form.mode === 'github' ? 'Cargar proyecto' : form.mode === 'import' ? 'Importar' : 'Crear'}
       </button>
     </div>
   </form>

@@ -290,7 +290,7 @@ func (s *Server) previewFile(w http.ResponseWriter, r *http.Request) {
 	}
 	mirror, err := filepath.Abs(filepath.Join(s.buildDir(p.ID), "preview"))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "error interno")
+		internalError(w, err)
 		return
 	}
 	// Las entradas del espejo son copias o enlaces a archivos regulares del

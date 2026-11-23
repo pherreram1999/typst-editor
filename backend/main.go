@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log"
@@ -18,13 +19,15 @@ import (
 	"typsteditor/backend/internal/database"
 	"typsteditor/backend/internal/httpapi"
 	"typsteditor/backend/internal/keygen"
+	"typsteditor/backend/internal/mail"
 )
 
 const usage = `Uso: server [comando]
 
 Comandos:
   (ninguno)        Inicia el servidor HTTP
-  serve            Inicia el servidor HTTP
+  serve            Inicia el servidor HTTP (crea la base y migra el esquema si hace falta)
+  migrate          Solo crea la base (MariaDB) y migra el esquema; luego termina
   key:generate     Genera JWT_SECRET y lo guarda en .env
       --show       Solo muestra la clave, no modifica .env
   help             Muestra esta ayuda
@@ -38,6 +41,13 @@ func main() {
 	switch cmd {
 	case "serve":
 		serve()
+	case "migrate":
+		cfg, err := config.Load()
+		if err != nil {
+			log.Fatal(err)
+		}
+		db, _ := openDB(cfg)
+		db.Close()
 	case "key:generate":
 		keyGenerate(os.Args[2:])
 	case "help", "-h", "--help":
@@ -82,17 +92,22 @@ func serve() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	db, err := database.Open(cfg.DSN)
-	if err != nil {
-		log.Fatalf("conexión a MariaDB: %v", err)
-	}
+	db, dialect := openDB(cfg)
 	defer db.Close()
-	if err := database.Migrate(db, cfg.AdminUser, cfg.AdminPassword, cfg.AdminName); err != nil {
-		log.Fatalf("migración: %v", err)
-	}
 
 	if err := os.MkdirAll(cfg.DataDir, 0o755); err != nil {
 		log.Fatalf("DATA_DIR: %v", err)
+	}
+	// Sin permiso de escritura nada funciona (proyectos, compilaciones), pero
+	// el fallo solo aparecería al usarlo: mejor no arrancar y decir por qué.
+	// Típico en Docker: un volumen montado como root y el proceso sin root.
+	if f, err := os.CreateTemp(cfg.DataDir, ".escritura-*"); err != nil {
+		log.Fatalf("DATA_DIR %s no tiene permiso de escritura para el usuario %d:%d: %v "+
+			"(en Docker, el volumen debe pertenecer a ese usuario; la imagen lo corrige al arrancar como root)",
+			cfg.DataDir, os.Getuid(), os.Getgid(), err)
+	} else {
+		f.Close()
+		os.Remove(f.Name())
 	}
 	// Fuentes adicionales: typst lee TYPST_FONT_PATHS, y todos los procesos
 	// typst (compilación, vista previa, sincronización, catálogo del
@@ -112,10 +127,32 @@ func serve() {
 			log.Printf("aviso: no se encuentra %q en el sistema: %v", bin, err)
 		}
 	}
-	api := httpapi.New(db, auth.NewIssuer(cfg.JWTSecret, cfg.TokenTTL), httpapi.Options{
+	key := cfg.ResendKey
+	if !cfg.MailEnabled {
+		key = ""
+	}
+	mailer := mail.New(key, cfg.MailFrom)
+	if mailer.Enabled() {
+		log.Printf("Correo: Resend, remitente %s", cfg.MailFrom)
+		if strings.Contains(cfg.PublicURL, "://localhost") || strings.Contains(cfg.PublicURL, "://127.") {
+			log.Printf("aviso: PUBLIC_URL es %s: los enlaces de los correos solo funcionarán en este equipo", cfg.PublicURL)
+		}
+	} else {
+		reason := "sin RESEND (clave de Resend)"
+		if !cfg.MailEnabled {
+			reason = "MAIL_ENABLED=false"
+		}
+		log.Printf("aviso: correo desactivado (%s): las cuentas nuevas reciben una contraseña temporal que deben cambiar al entrar; las invitaciones por correo muestran el enlace para copiarlo", reason)
+	}
+	api := httpapi.New(db, dialect, auth.NewIssuer(cfg.JWTSecret, cfg.TokenTTL), httpapi.Options{
 		DataDir: cfg.DataDir, TypstBin: cfg.TypstBin, GitBin: cfg.GitBin, GitHubAPI: cfg.GitHubAPI,
 		StaticDir: cfg.StaticDir, FontDirs: cfg.FontDirs,
+		PublicURL: cfg.PublicURL, MCPEnabled: cfg.MCPEnabled,
+		Mail: mailer,
 	})
+	if cfg.MCPEnabled {
+		log.Printf("MCP: %s/mcp", cfg.PublicURL)
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
@@ -139,4 +176,20 @@ func serve() {
 	defer cancel()
 	_ = srv.Shutdown(ctx)
 	api.Shutdown()
+}
+
+// openDB conecta con el motor de DB_DRIVER (en MariaDB crea la base si no
+// existe) y migra el esquema; sale con error si algo falla.
+func openDB(cfg *config.Config) (*sql.DB, database.Dialect) {
+	db, dialect, err := database.Open(database.Options{
+		Driver: cfg.DBDriver, DSN: cfg.DSN, URL: cfg.DBURL, AuthToken: cfg.DBAuthToken,
+	})
+	if err != nil {
+		log.Fatalf("conexión a la base de datos (%s): %v", cfg.DBDriver, err)
+	}
+	if err := database.Migrate(db, dialect, cfg.AdminUser, cfg.AdminPassword, cfg.AdminName, cfg.AdminEmail); err != nil {
+		db.Close()
+		log.Fatalf("migración: %v", err)
+	}
+	return db, dialect
 }

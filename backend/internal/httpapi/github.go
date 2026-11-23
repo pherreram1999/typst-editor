@@ -8,8 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/go-sql-driver/mysql"
-
 	"typsteditor/backend/internal/github"
 )
 
@@ -66,7 +64,7 @@ func (s *Server) loadAccount(w http.ResponseWriter, r *http.Request) (*GitHubAcc
 		return nil, false
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "error interno")
+		internalError(w, err)
 		return nil, false
 	}
 	return a, true
@@ -77,7 +75,7 @@ func (s *Server) listAccounts(w http.ResponseWriter, r *http.Request) {
 		`SELECT id, label, login, is_org, created_at, updated_at FROM github_accounts WHERE user_id = ? ORDER BY login`,
 		currentUser(r).ID)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "error interno")
+		internalError(w, err)
 		return
 	}
 	defer rows.Close()
@@ -85,7 +83,7 @@ func (s *Server) listAccounts(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var a GitHubAccount
 		if err := rows.Scan(&a.ID, &a.Label, &a.Login, &a.IsOrg, &a.CreatedAt, &a.UpdatedAt); err != nil {
-			writeError(w, http.StatusInternalServerError, "error interno")
+			internalError(w, err)
 			return
 		}
 		out = append(out, a)
@@ -153,19 +151,18 @@ func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
 	res, err := s.db.ExecContext(r.Context(),
 		`INSERT INTO github_accounts (user_id, label, login, is_org, token) VALUES (?, ?, ?, ?, ?)`,
 		currentUser(r).ID, in.Label, gu.Login, gu.IsOrg(), in.Token)
-	var me *mysql.MySQLError
-	if errors.As(err, &me) && me.Number == 1062 {
+	if s.dialect.IsDuplicate(err) {
 		writeError(w, http.StatusConflict, "ya tienes registrada la cuenta «"+gu.Login+"»; actualiza su token")
 		return
 	}
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "error interno")
+		internalError(w, err)
 		return
 	}
 	id, _ := res.LastInsertId()
 	a, err := s.ownAccount(r, id)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "error interno")
+		internalError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, a)
@@ -206,7 +203,7 @@ func (s *Server) updateAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err := s.db.ExecContext(r.Context(),
 		`UPDATE github_accounts SET label = ?, token = ? WHERE id = ?`, a.Label, a.token, a.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, "error interno")
+		internalError(w, err)
 		return
 	}
 	a, _ = s.ownAccount(r, a.ID)
@@ -220,7 +217,7 @@ func (s *Server) deleteAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	// Los proyectos que la usaban quedan sin credenciales (ON DELETE SET NULL).
 	if _, err := s.db.ExecContext(r.Context(), `DELETE FROM github_accounts WHERE id = ?`, a.ID); err != nil {
-		writeError(w, http.StatusInternalServerError, "error interno")
+		internalError(w, err)
 		return
 	}
 	s.repoCache.Delete(a.ID)

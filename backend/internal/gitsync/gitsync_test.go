@@ -94,11 +94,67 @@ func TestPushPull(t *testing.T) {
 	}
 	os.WriteFile(filepath.Join(db, "main.typ"), []byte("= Otra B\n\nDesde B\n"), 0o644)
 	_, err = g.Pull(ctx, db, r, a)
-	if !errors.As(err, &ue) || !strings.Contains(ue.Msg, "conflicto") {
-		t.Fatalf("se esperaba conflicto, obtuve %v", err)
+	var ce *ConflictError
+	if !errors.As(err, &ce) || len(ce.Files) != 1 || ce.Files[0].Path != "main.typ" {
+		t.Fatalf("se esperaba conflicto en main.typ, obtuve %v", err)
+	}
+	f := ce.Files[0]
+	if f.Ours == nil || *f.Ours != "= Otra B\n\nDesde B\n" || f.Theirs == nil || *f.Theirs != "= Conflicto A\n\nDesde B\n" || f.Base == nil || *f.Base != "= Hola\n\nDesde B\n" {
+		t.Fatalf("versiones del conflicto inesperadas: base=%q ours=%q theirs=%q", *f.Base, *f.Ours, *f.Theirs)
 	}
 	st, err := g.GetStatus(ctx, db, "main")
 	if err != nil || len(st.Changes) != 0 {
 		t.Fatalf("tras abortar, el árbol debe quedar limpio: %+v %v", st, err)
+	}
+
+	// Resolver con una versión editada a mano (y otro archivo sin conflicto
+	// que el remoto también cambió entra solo con la fusión).
+	merged := "= Fusionado\n\nDesde B\n"
+	if _, err := g.Resolve(ctx, db, a, "otro-sha", []Resolution{{Path: "main.typ", OursBlob: f.OursBlob, Content: &merged}}); err == nil {
+		t.Fatal("Resolve con un commit remoto distinto del guardado debería fallar")
+	}
+	// Si la versión local cambia después del pull, hay que repetir.
+	os.WriteFile(filepath.Join(db, "main.typ"), []byte("= Otra B editada\n\nDesde B\n"), 0o644)
+	if _, err := g.Resolve(ctx, db, a, ce.Theirs, []Resolution{{Path: "main.typ", OursBlob: f.OursBlob, Content: &merged}}); !errors.As(err, &ue) || !strings.Contains(ue.Msg, "cambió") {
+		t.Fatalf("se esperaba aviso de archivo cambiado, obtuve %v", err)
+	}
+	if st, _ := g.GetStatus(ctx, db, "main"); len(st.Changes) != 0 {
+		t.Fatalf("tras cancelar la resolución, el árbol debe quedar limpio: %+v", st)
+	}
+	_, err = g.Pull(ctx, db, r, a)
+	if !errors.As(err, &ce) {
+		t.Fatalf("se esperaba conflicto otra vez, obtuve %v", err)
+	}
+	if _, err := g.Resolve(ctx, db, a, ce.Theirs, []Resolution{{Path: "main.typ", OursBlob: ce.Files[0].OursBlob, Content: &merged}}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(db, "main.typ")); string(b) != merged {
+		t.Fatalf("resultado de la fusión: %q", b)
+	}
+	if _, err := g.Push(ctx, db, r, a, "tras fusionar"); err != nil {
+		t.Fatalf("tras resolver, push debe funcionar: %v", err)
+	}
+	if _, err := g.Pull(ctx, da, r, a); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(da, "main.typ")); string(b) != merged {
+		t.Fatalf("A no recibió la fusión: %q", b)
+	}
+
+	// Borrado en un lado y modificado en el otro: se elige una versión entera.
+	os.WriteFile(filepath.Join(da, "otro.typ"), []byte("x modificado por A\n"), 0o644)
+	if _, err := g.Push(ctx, da, r, a, "A modifica otro"); err != nil {
+		t.Fatal(err)
+	}
+	os.Remove(filepath.Join(db, "otro.typ"))
+	_, err = g.Pull(ctx, db, r, a)
+	if !errors.As(err, &ce) || ce.Files[0].HasOurs || !ce.Files[0].HasTheir {
+		t.Fatalf("se esperaba conflicto borrado/modificado, obtuve %v", err)
+	}
+	if _, err := g.Resolve(ctx, db, a, ce.Theirs, []Resolution{{Path: "otro.typ", OursBlob: ce.Files[0].OursBlob, Take: "theirs"}}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(db, "otro.typ")); string(b) != "x modificado por A\n" {
+		t.Fatalf("debió quedar la versión del remoto: %q", b)
 	}
 }
