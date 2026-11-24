@@ -6,8 +6,8 @@
   // suyo, guardado en localStorage— y después el editor completo con una
   // sesión de invitado que vive solo en esta pestaña (sessionStorage).
   import { onMount } from 'svelte'
-  import { session, enterGuest } from '../lib/session.svelte.js'
-  import { inviteInfo, joinInvite } from '../lib/api.js'
+  import { session, enterGuest, storedToken } from '../lib/session.svelte.js'
+  import { inviteInfo, joinInvite, accountRequest, rememberReturn } from '../lib/api.js'
   import { randomGuestName, savedGuestName, saveGuestName } from '../lib/guestName.js'
   import { pageIn } from '../lib/motion.js'
 
@@ -24,6 +24,10 @@
   let busy = $state(false)
   let joined = $state(null) // { project_id, permission, expires_at }
   let input = $state()
+  // Con la sesión iniciada: si la cuenta ya tiene acceso al proyecto se abre
+  // directamente (#/p/<id>); si no, se entra como invitado con su nombre.
+  let checkedFor = null // id de la cuenta ya comprobada
+  let noAccess = $state(false)
 
   const random = $derived(!!generated && name.trim() === generated)
   const colors = ['#1E40AF', '#B91C1C', '#047857', '#7C3AED', '#C2410C', '#0E7490', '#BE185D', '#4D7C0F']
@@ -76,6 +80,24 @@
     // «Salir · cambiar mi nombre» del menú del celular (Workspace).
     window.addEventListener('typsteditor:guest-exit', changeName)
     return () => window.removeEventListener('typsteditor:guest-exit', changeName)
+  })
+
+  $effect(() => {
+    const acc = session.account
+    const tok = storedToken()
+    if (!acc || !tok || !info || checkedFor === acc.id) return
+    checkedFor = acc.id
+    const pid = info.project_id
+    accountRequest(tok, `/projects/${pid}`).then(
+      () => {
+        forget()
+        location.replace(`#/p/${pid}`)
+      },
+      () => {
+        noAccess = true
+        if (!joined && (random || !name.trim())) name = acc.name
+      },
+    )
   })
 
   // El enlace caducó o se revocó mientras se editaba (api.js deja user en null).
@@ -229,9 +251,18 @@
               </p>
             </div>
             <button class="btn-primary w-full" disabled={busy || !name.trim()}>{busy ? 'Entrando…' : 'Entrar al proyecto'}</button>
-            <p class="text-center text-xs text-slate-500">
-              Entras sin cuenta. ¿Tienes una? <a href="#/login">Inicia sesión</a>
-            </p>
+            {#if session.account}
+              {#if noAccess}
+                <p class="text-center text-xs text-slate-500">
+                  Tienes la sesión iniciada como <strong class="font-semibold">{session.account.name}</strong>, pero tu cuenta no es miembro de este
+                  proyecto: entrarás como invitado. <a href="#/">Ir a mis proyectos</a>
+                </p>
+              {/if}
+            {:else}
+              <p class="text-center text-xs text-slate-500">
+                Entras sin cuenta. ¿Tienes una? <a href="#/login" onclick={() => rememberReturn(`#/i/${token}`)}>Inicia sesión</a>
+              </p>
+            {/if}
           </form>
         {:else if error}
           <div class="px-6 py-8 text-center">

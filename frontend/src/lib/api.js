@@ -10,11 +10,12 @@ export class ApiError extends Error {
 const RETURN_KEY = 'typsteditor.return'
 
 // Rutas a las que volver tras iniciar sesión (la autorización OAuth de una
-// aplicación llega con su petición en el hash y no debe perderse).
-export function rememberReturn() {
-  if (location.hash.startsWith('#/oauth?') || location.hash.startsWith('#/unirse/')) {
+// aplicación llega con su petición en el hash y no debe perderse; un enlace
+// de invitado o de unirse vuelve a abrirse ya con la cuenta).
+export function rememberReturn(hash = location.hash) {
+  if (/^#\/(oauth\?|unirse\/|i\/)/.test(hash)) {
     try {
-      sessionStorage.setItem(RETURN_KEY, location.hash)
+      sessionStorage.setItem(RETURN_KEY, hash)
     } catch {}
   }
 }
@@ -245,6 +246,14 @@ async function publicJSON(method, path, body) {
     headers: { Accept: 'application/json', ...(body ? { 'Content-Type': 'application/json' } : {}) },
     body: body ? JSON.stringify(body) : undefined,
   })
+  const data = await res.json().catch(() => null)
+  if (!res.ok) throw new ApiError(res.status, data?.error ?? `Error ${res.status}`)
+  return data
+}
+// Petición GET con el token de la cuenta propia, sin efectos sobre la sesión
+// (sirve aunque haya una sesión de invitado abierta en memoria).
+export async function accountRequest(token, path) {
+  const res = await fetch(`/api${path}`, { headers: { Accept: 'application/json', Authorization: `Bearer ${token}` } })
   const data = await res.json().catch(() => null)
   if (!res.ok) throw new ApiError(res.status, data?.error ?? `Error ${res.status}`)
   return data

@@ -13,6 +13,9 @@ function readToken() {
 export const session = $state({
   token: readToken(),
   user: null,
+  // Cuenta propia validada (también mientras se está dentro como invitado,
+  // cuando user es el usuario sintético del enlace).
+  account: null,
   ready: false,
   // Sesión de invitado (enlace #/i/…): token y usuario solo en memoria, sin
   // tocar el token guardado de quien tenga cuenta en este navegador.
@@ -22,6 +25,7 @@ export const session = $state({
 export function setSession(token, user) {
   session.token = token
   session.user = user
+  session.account = user
   try {
     localStorage.setItem(TOKEN_KEY, token)
   } catch {}
@@ -30,6 +34,19 @@ export function setSession(token, user) {
 export function clearSession() {
   session.token = null
   session.user = null
+  session.account = null
+  try {
+    localStorage.removeItem(TOKEN_KEY)
+  } catch {}
+}
+
+// Token guardado de la cuenta propia (independiente de una sesión de invitado).
+export const storedToken = readToken
+
+// La cuenta guardada ya no es válida: se olvida sin tocar una sesión de invitado abierta.
+export function forgetAccount() {
+  if (!session.guest) return clearSession()
+  session.account = null
   try {
     localStorage.removeItem(TOKEN_KEY)
   } catch {}
@@ -47,5 +64,5 @@ export function enterGuest(token, user) {
 export function leaveGuest() {
   session.guest = false
   session.token = readToken()
-  session.user = null
+  session.user = session.account
 }

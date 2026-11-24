@@ -1,8 +1,8 @@
 <script>
   import Logo from './lib/Logo.svelte'
   import { onMount } from 'svelte'
-  import { session, clearSession, leaveGuest } from './lib/session.svelte.js'
-  import { api, rememberReturn, takeReturn } from './lib/api.js'
+  import { session, clearSession, leaveGuest, storedToken, forgetAccount } from './lib/session.svelte.js'
+  import { accountRequest, rememberReturn, takeReturn } from './lib/api.js'
   import Navbar from './lib/Navbar.svelte'
   import EmailPrompt from './lib/EmailPrompt.svelte'
   import ChangePassword from './lib/ChangePassword.svelte'
@@ -39,13 +39,20 @@
     path = location.hash.slice(1) || '/'
   }
 
-  // Validar el token guardado contra el backend.
+  // Validar el token guardado contra el backend. Con un enlace de invitado
+  // abierto también se valida (Invite.svelte usa session.account para llevar
+  // al proyecto a quien ya tiene acceso), pero sin pisar la sesión de invitado.
   async function restoreSession() {
-    if (session.token) {
+    const tok = storedToken()
+    if (tok) {
       try {
-        session.user = await api.me()
+        const me = await accountRequest(tok, '/auth/me')
+        if (storedToken() === tok) {
+          session.account = me
+          if (!session.guest) session.user = me
+        }
       } catch {
-        clearSession()
+        if (storedToken() === tok) forgetAccount()
       }
     }
     session.ready = true
@@ -53,10 +60,7 @@
 
   onMount(() => {
     window.addEventListener('hashchange', onHash)
-    // Con un enlace de invitado la sesión la abre Invite.svelte; la guardada
-    // se valida al salir de él (efecto de abajo).
-    if (inviteToken) session.ready = true
-    else restoreSession()
+    restoreSession()
     return () => window.removeEventListener('hashchange', onHash)
   })
 
