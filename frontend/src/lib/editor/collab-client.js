@@ -25,6 +25,8 @@ import { formatKeymap } from './commands.js'
 import { imageHover, imageHoverTheme } from './imageHover.js'
 import { tableHover, tableHoverTheme } from './tableHover.js'
 import { marginGuide, savedMargin } from './marginGuide.js'
+import { spellcheck, spellable } from './spellcheck.js'
+import { spellEnabled } from '../spell/speller.js'
 
 export const editorTheme = EditorView.theme({
   // Colores de app.css: cambian con el tema.
@@ -101,6 +103,8 @@ export class CollabSession {
     this.tracked = new Set() // posiciones que se actualizan con cada cambio (track)
     this.marginCol = savedMargin() // guía de margen derecho (0: sin guía)
     this.marginConf = new Compartment()
+    this.spellOn = spellEnabled() // revisión ortográfica (por navegador)
+    this.spellConf = new Compartment()
     this.lastMsg = 0
     // Al volver a la pestaña, recuperar la red o el foco: reconectar ya en vez
     // de esperar al temporizador (Chrome lo retrasa en pestañas ocultas) y
@@ -136,6 +140,7 @@ export class CollabSession {
       EditorView.lineWrapping,
       editorTheme,
       this.marginConf.of(marginGuide(this.marginCol)),
+      this.spellConf.of(this.spellExtension()),
       remoteCursors,
       collab({ startVersion: version }),
       EditorView.domEventHandlers({
@@ -435,6 +440,16 @@ export class CollabSession {
     })
     this.view.focus()
     return true
+  }
+
+  // Revisión ortográfica: en .typ/.txt/.md, si está activada y se puede editar.
+  spellExtension() {
+    return this.spellOn && !this.readOnly && spellable(this.path) ? spellcheck() : []
+  }
+
+  setSpell(on) {
+    this.spellOn = on
+    this.view?.dispatch({ effects: this.spellConf.reconfigure(this.spellExtension()) })
   }
 
   // Cambia la columna de la guía de margen (0: quitarla).

@@ -9,6 +9,9 @@ const KEYWORDS = new Set([
   'import', 'include', 'as', 'context', 'and', 'or', 'not',
 ])
 const ATOMS = new Set(['none', 'auto', 'true', 'false'])
+// «#let …», «#set …», «#show …», «#import …», «#include …»: el resto de la
+// línea (y lo que abran sus paréntesis) es código, no marcado.
+const STATEMENTS = new Set(['let', 'set', 'show', 'import', 'include'])
 const IDENT = /^[\p{L}_][\p{L}\p{N}_-]*/u
 
 // Pila de modos: 'markup' | 'code' | 'math' | 'content' (corchetes en código)
@@ -130,6 +133,12 @@ function tokenMarkup(stream, state) {
       state.inlineDepth = state.stack.length
       const m = stream.match(IDENT)
       if (m) {
+        if (STATEMENTS.has(m[0])) {
+          state.inlineCode = false
+          state.lineCode = true
+          state.lineDepth = state.stack.length
+          return 'keyword'
+        }
         if (KEYWORDS.has(m[0])) return 'keyword'
         if (ATOMS.has(m[0])) return 'atom'
         return 'variableName.function'
@@ -148,7 +157,14 @@ function tokenMarkup(stream, state) {
     return 'bracket'
   }
   if (ch === '`') {
-    if (stream.match(/^```[\s\S]*?```/) || stream.match(/^`[^`]*`/)) return 'monospace'
+    if (stream.match('```', false)) {
+      if (stream.match(/^```[\s\S]*?```/)) return 'monospace'
+      // Bloque ``` de varias líneas: sigue hasta el ``` de cierre.
+      state.rawBlock = true
+      stream.skipToEnd()
+      return 'monospace'
+    }
+    if (stream.match(/^`[^`]*`/)) return 'monospace'
     stream.skipToEnd()
     return 'monospace'
   }
@@ -165,9 +181,12 @@ function tokenMarkup(stream, state) {
     state.emph = !state.emph
     return 'emphasis'
   }
-  stream.next()
-  // Consumir texto plano de golpe hasta el próximo carácter especial.
-  stream.match(/^[^\\#$\]`<@*_/\s]*/)
+  // Espacios aparte: tras ellos puede empezar una URL.
+  if (!stream.eatSpace()) {
+    stream.next()
+    // Consumir texto plano de golpe hasta el próximo carácter especial.
+    stream.match(/^[^\\#$\]`<@*_/\s]*/)
+  }
   if (state.strong && state.emph) return 'strong emphasis'
   if (state.strong) return 'strong'
   if (state.emph) return 'emphasis'
@@ -176,9 +195,16 @@ function tokenMarkup(stream, state) {
 
 export const typstLanguage = StreamLanguage.define({
   name: 'typst',
-  startState: () => ({ stack: ['markup'], blockComment: false, strong: false, emph: false, inlineCode: false, inlineDepth: 0 }),
+  startState: () => ({ stack: ['markup'], blockComment: false, strong: false, emph: false, inlineCode: false, inlineDepth: 0, lineCode: false, lineDepth: 0, rawBlock: false }),
   copyState: (s) => ({ ...s, stack: s.stack.slice() }),
   token(stream, state) {
+    if (state.rawBlock) {
+      if (stream.skipTo('```')) {
+        stream.match('```')
+        state.rawBlock = false
+      } else stream.skipToEnd()
+      return 'monospace'
+    }
     if (state.blockComment) {
       if (stream.skipTo('*/')) {
         stream.match('*/')
@@ -189,6 +215,12 @@ export const typstLanguage = StreamLanguage.define({
     const mode = top(state)
     if (mode === 'math') return tokenMath(stream, state)
     if (mode === 'paren' || mode === 'brace') return tokenCode(stream, state)
+    if (state.lineCode && state.stack.length === state.lineDepth) {
+      // La instrucción termina con la línea (salvo paréntesis abiertos, que
+      // siguen en modo código por la pila).
+      if (stream.sol()) state.lineCode = false
+      else return tokenCode(stream, state)
+    }
     if (state.inlineCode) {
       // Tras "#ident" sigue una llamada/acceso o se vuelve al marcado.
       const ch = stream.peek()
@@ -212,6 +244,7 @@ export const typstLanguage = StreamLanguage.define({
   blankLine(state) {
     state.strong = false
     state.emph = false
+    if (state.stack.length === state.lineDepth) state.lineCode = false
   },
   languageData: { commentTokens: { line: '//', block: { open: '/*', close: '*/' } } },
 })

@@ -21,6 +21,8 @@ backend/data/
 # --- Frontend (Node / Vite) ---
 node_modules/
 frontend/dist/
+# Diccionario ortográfico generado al compilar (scripts/spell-dict.mjs)
+frontend/src/lib/spell/es-MX.words.txt
 .vite/
 
 # --- Logs y temporales ---

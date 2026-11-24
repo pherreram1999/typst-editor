@@ -1,8 +1,19 @@
 import { defineConfig } from 'vite'
 import { svelte } from '@sveltejs/vite-plugin-svelte'
+import { ensureSpellDict } from './scripts/spell-dict.mjs'
+
+// Diccionario del corrector ortográfico (src/lib/spell/es-MX.words.txt, no se
+// versiona): se genera antes de compilar o de arrancar el servidor de desarrollo.
+const spellDict = () => ({
+  name: 'spell-dict',
+  async buildStart() {
+    const n = await ensureSpellDict()
+    if (n) this.info?.(`diccionario es-MX generado (${n} palabras)`)
+  },
+})
 
 export default defineConfig({
-  plugins: [svelte()],
+  plugins: [spellDict(), svelte()],
   preview: {
     proxy: {
       '/api': { target: process.env.API_TARGET ?? 'http://localhost:8080', ws: true },

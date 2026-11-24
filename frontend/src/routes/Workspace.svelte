@@ -12,6 +12,8 @@
   import { relativePath, figureLabel, mediaSnippet, resolvePath, escapeString } from '../lib/editor/snippets.js'
   import EditorToolbar from '../lib/editor/EditorToolbar.svelte'
   import { savedMargin, saveMargin } from '../lib/editor/marginGuide.js'
+  import { spellEnabled, saveSpellEnabled } from '../lib/spell/speller.js'
+  import { spellable } from '../lib/editor/spellcheck.js'
   import * as cmd from '../lib/editor/commands.js'
   import Preview from '../lib/workspace/Preview.svelte'
   import PdfView from '../lib/workspace/PdfView.svelte'
@@ -385,6 +387,12 @@
   let editorDrag = $state(0) // >0 mientras se arrastran archivos sobre el editor
   let fmt = $state({}) // formato bajo el cursor (barra de herramientas)
   let marginCol = $state(savedMargin()) // guía de margen derecho del editor (0: sin guía)
+  let spellOn = $state(spellEnabled()) // revisión ortográfica (español de México)
+  function setSpell(on) {
+    spellOn = on
+    saveSpellEnabled(on)
+    collab?.setSpell(on)
+  }
 
   // ---------- imágenes: insertar (barra, Ctrl+Alt+I) o cambiar (tarjeta sobre image("…")) ----------
   let imageDialog = $state() // ImageModal
@@ -491,6 +499,8 @@
         marginCol = arg
         saveMargin(arg)
         return s.setMargin(arg)
+      case 'spell':
+        return setSpell(arg)
     }
   }
 
@@ -1000,6 +1010,7 @@
             file={current && !current.editable ? `${currentPath} (no editable)` : currentPath}
             active={fmt}
             margin={marginCol}
+            spell={spellable(currentPath) ? spellOn : null}
             disabled={!current?.editable || status !== 'online'}
             labels={() => cmd.labelsIn(collab?.text ?? '')}
             onaction={onTool}
@@ -1229,6 +1240,13 @@
         <svg class="shrink-0 text-slate-500" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" /></svg>
         <span class="text-[15px] text-slate-900">Archivos del proyecto</span>
       </button>
+      {#if !readOnly && spellable(currentPath)}
+        <button type="button" role="menuitemcheckbox" aria-checked={spellOn} class="flex min-h-13 w-full cursor-pointer items-center gap-4 px-5 py-2 text-left active:bg-slate-100" onclick={() => setSpell(!spellOn)}>
+          <svg class="shrink-0 text-slate-500" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 14 4-10 4 10M5.5 10.5h5" /><path d="M3 19c1.5-1.3 3-1.3 4.5 0s3 1.3 4.5 0 3-1.3 4.5 0 3 1.3 4.5 0" /></svg>
+          <span class="min-w-0 flex-1"><span class="block text-[15px] text-slate-900">Revisión ortográfica</span><span class="block text-xs text-slate-500">Toca una palabra subrayada para ver sugerencias</span></span>
+          <span class="h-6 w-10 shrink-0 rounded-full p-0.5 transition-colors {spellOn ? 'bg-primary' : 'bg-slate-300'}" aria-hidden="true"><span class="block size-5 rounded-full bg-white shadow transition-transform {spellOn ? 'translate-x-4' : ''}"></span></span>
+        </button>
+      {/if}
       {#if pane === 'editor' && !isBib && current?.editable}
         <button type="button" class="flex min-h-13 w-full cursor-pointer items-center gap-4 px-5 py-2 text-left active:bg-slate-100 disabled:cursor-default disabled:opacity-45" onclick={() => fromMenu(() => onTool('search'))}>
           <svg class="shrink-0 text-slate-500" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" /></svg>

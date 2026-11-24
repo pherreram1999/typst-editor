@@ -80,6 +80,7 @@ var contentTypes = map[string]string{
 	".wasm": "application/wasm",
 	".svg":  "image/svg+xml",
 	".json": "application/json",
+	".txt":  "text/plain; charset=utf-8", // diccionario ortográfico (~2 MB → ~270 KB)
 }
 
 // gzipCache guarda los assets comprimidos (nombre -> []byte, nil si no se

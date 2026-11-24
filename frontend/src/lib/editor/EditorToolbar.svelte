@@ -19,7 +19,9 @@
 
   // margin: columna de la guía de margen derecho (0: sin guía); se elige en
   // «Más» y se avisa con onaction('margin', columna).
-  let { file = '', active = {}, labels = () => [], disabled = false, compact = false, margin = 0, onaction } = $props()
+  // spell: revisión ortográfica activada (null: no aplica a este archivo); se
+  // cambia en «Más» con onaction('spell', activar).
+  let { file = '', active = {}, labels = () => [], disabled = false, compact = false, margin = 0, spell = null, onaction } = $props()
 
   const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform)
   const k = (s) => (isMac ? s.replace(/Ctrl\+/g, '⌘').replace(/Alt\+/g, '⌥').replace(/Mayús\+/g, '⇧') : s)
@@ -351,6 +353,22 @@
             {/each}
           {/each}
           {#if folded.length}<div aria-hidden="true" class="mx-1 my-1.5 h-px bg-slate-200"></div>{/if}
+          {#if spell !== null}
+            <button
+              type="button"
+              role="menuitemcheckbox"
+              aria-checked={spell}
+              class="flex h-8 w-full cursor-pointer items-center gap-2.5 rounded-md px-2 text-left text-[13px] text-slate-800 hover:bg-slate-100"
+              title="Subraya las palabras que no están en el diccionario de español (México); clic derecho sobre una para ver sugerencias"
+              onclick={() => act('spell', !spell)}
+            >
+              <svg class="shrink-0 text-slate-600" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 14 4-10 4 10M5.5 10.5h5" /><path d="M3 19c1.5-1.3 3-1.3 4.5 0s3 1.3 4.5 0 3-1.3 4.5 0 3 1.3 4.5 0" /></svg>
+              <span class="flex-1">Revisión ortográfica</span>
+              <span class="h-4 w-7 rounded-full p-0.5 transition-colors {spell ? 'bg-primary' : 'bg-slate-300'}" aria-hidden="true"
+                ><span class="block size-3 rounded-full bg-white transition-transform {spell ? 'translate-x-3' : ''}"></span></span
+              >
+            </button>
+          {/if}
           <div class="flex items-center gap-1 px-2 py-1" role="group" aria-label="Guía de margen derecho">
             <svg class="mr-1 shrink-0 text-slate-600" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h9M4 10h11M4 14h8M4 18h10" /><path d="M18 3v18" stroke-dasharray="2 2" /></svg>
             <span class="flex-1 text-[13px] whitespace-nowrap text-slate-800" title="Línea vertical que marca hasta qué columna no debería llegar el texto (como en los IDE de JetBrains)">Guía de margen</span>

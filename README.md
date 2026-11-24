@@ -9,6 +9,7 @@ Editor web colaborativo de documentos [Typst](https://typst.app): varias persona
 - **Subida de archivos con Uppy** (arrastrar y soltar, carpeta de destino), **reemplazo** de imágenes y **optimización sin pérdida** de PNG/JPEG: mismos píxeles y mismo tamaño en el documento, pero mucho menos peso (los diagramas suelen bajar a la cuarta parte).
 - **Sincronización vista previa ↔ código:** un clic en la vista previa lleva al párrafo correspondiente del código y un clic en el código desplaza la vista previa hasta ese bloque y lo resalta.
 - **Documentos grandes** (tesis de cientos de páginas con muchas capturas): la vista previa se compila con copias reducidas de las imágenes que conservan su tamaño en la página, así que la paginación es la misma que la del PDF (que usa los originales). El navegador solo descarga y muestra las páginas cercanas a la vista y, al recompilar, solo las que cambiaron. `typst` corre con prioridad baja y con un límite de procesos simultáneos.
+- **Revisión ortográfica en español de México.** Subraya en el editor las palabras que no están en el diccionario, solo en la prosa (no en código, matemáticas, cadenas, raw, etiquetas ni comentarios). Clic derecho (o un toque en el celular) muestra sugerencias, «Agregar al diccionario» (diccionario personal del navegador) e «Ignorar». Se activa o desactiva en «Más» de la barra del editor. Todo ocurre en el navegador, en un *Web Worker*: el texto no sale del equipo.
 - **Proyectos multiarchivo** (`.typ`, `.bib`, imágenes…). Cada proyecto es un repositorio git en `DATA_DIR/projects/<id>`.
 - **Plantilla por defecto** en tamaño carta (`us-letter`) y español de México (`lang: "es", region: "mx"`).
 - **Plantillas y copias.** Cualquier proyecto se puede duplicar. El propietario puede publicarlo como plantilla con categoría y descripción (p. ej. distintas carátulas). Las plantillas aparecen para todos en una galería con miniatura y se usan creando una copia.
@@ -231,6 +232,12 @@ Mensajes del protocolo WebSocket:
   - `rev` (el proyecto cambió: recompilar);
   - `members` (cambió la lista de miembros);
   - `closed` (`revoked: true` si se retiró el acceso).
+
+### Revisión ortográfica
+
+El diccionario es el de [RLA-ES](https://github.com/sbosio/rla-es) para español de México (el de LibreOffice), del paquete `dictionary-es-mx` (licencia GPL-3.0 / LGPL-3.0 / MPL-1.1). Al compilar el frontend, `frontend/scripts/spell-dict.mjs` (plugin de Vite) lo expande con `nspell` a sus ~550 000 formas (conjugaciones, plurales, pronombres enclíticos como «dígaselo», nombres propios) y las guarda en `frontend/src/lib/spell/es-MX.words.txt` con codificación frontal: 2,2 MB, ~300 KB comprimido, que el navegador descarga una vez por versión. El archivo generado no se versiona.
+
+Un *Web Worker* (`spell.worker.js`) busca cada palabra con búsqueda binaria y propone correcciones por distancia de edición, dando preferencia a los errores típicos del español (acentos, b/v, c/s/z, g/j, h muda, «que/gue»). Las palabras con mayúscula inicial se aceptan si existen en minúscula, y las siglas (hasta 5 mayúsculas), las palabras junto a cifras, las extensiones y los dominios no se revisan. El diccionario personal se guarda en el navegador (`localStorage`).
 
 Los cambios externos (un *pull*, o subir un archivo que está abierto) se emiten como una actualización más del servidor. Los editores abiertos los reciben sin perder sus cambios pendientes. Los documentos se guardan en disco con un breve retardo. Compilar, duplicar o hacer operaciones git primero vuelca a disco lo que haya en memoria.
 
