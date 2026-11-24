@@ -1,4 +1,4 @@
-# Typst Extend
+# nullpointer editor
 
 Editor web colaborativo de documentos [Typst](https://typst.app): varias personas editan el mismo documento a la vez, ven la vista previa y el PDF al instante y sincronizan el proyecto con GitHub.
 
@@ -309,17 +309,17 @@ Comprobación rápida: `curl -i PUBLIC_URL/mcp` debe responder `401` con una cab
 
 **Claude Code** (el comando aparece ya relleno al crear el token):
 ```bash
-claude mcp add --transport http typst-extend http://localhost:8080/mcp \
+claude mcp add --transport http nullpointer-editor http://localhost:8080/mcp \
   --header "Authorization: Bearer tse_…"
 # --scope user para todos tus proyectos, --scope project para compartirlo en .mcp.json
-claude mcp list        # debe mostrar typst-extend como conectado
+claude mcp list        # debe mostrar nullpointer-editor como conectado
 ```
 
 **Cursor** (`~/.cursor/mcp.json` o `.cursor/mcp.json`), **Claude Code** (`.mcp.json`) y otros clientes con el mismo formato:
 ```json
 {
   "mcpServers": {
-    "typst-extend": {
+    "nullpointer-editor": {
       "type": "http",
       "url": "http://localhost:8080/mcp",
       "headers": { "Authorization": "Bearer tse_…" }
@@ -331,9 +331,9 @@ claude mcp list        # debe mostrar typst-extend como conectado
 **VS Code** (`.vscode/mcp.json`). El token se pide al conectar y no queda en el archivo:
 ```json
 {
-  "inputs": [{ "id": "typst-token", "type": "promptString", "description": "Token de Typst Extend", "password": true }],
+  "inputs": [{ "id": "typst-token", "type": "promptString", "description": "Token de nullpointer editor", "password": true }],
   "servers": {
-    "typst-extend": {
+    "nullpointer-editor": {
       "type": "http",
       "url": "http://localhost:8080/mcp",
       "headers": { "Authorization": "Bearer ${input:typst-token}" }
@@ -356,11 +356,11 @@ curl -s http://localhost:8080/mcp \
 
 Con `PUBLIC_URL` en https:
 
-- **claude.ai y Claude Desktop:** abre *Configuración › Conectores › Añadir conector personalizado*, pon un nombre (p. ej. «Typst Extend») y la URL `https://…/mcp`, y deja vacíos el *Client ID* y el *Client Secret*. Pulsa «Conectar». En planes de equipo o empresa puede que solo un administrador de la organización pueda añadirlo.
+- **claude.ai y Claude Desktop:** abre *Configuración › Conectores › Añadir conector personalizado*, pon un nombre (p. ej. «nullpointer editor») y la URL `https://…/mcp`, y deja vacíos el *Client ID* y el *Client Secret*. Pulsa «Conectar». En planes de equipo o empresa puede que solo un administrador de la organización pueda añadirlo.
 - **ChatGPT:** activa *Configuración › Conectores › Avanzado › Modo desarrollador*. Luego, en *Conectores › Crear*, pon la URL `https://…/mcp` y la autenticación *OAuth*, y confirma que confías en el conector.
-- **Claude Code con OAuth**, sin token: `claude mcp add --transport http typst-extend https://…/mcp`. Después, dentro de Claude Code, ejecuta `/mcp` › *typst-extend* › *Authenticate*. Funciona también con `http://localhost:8080/mcp`, porque se aceptan las redirecciones a `localhost`.
+- **Claude Code con OAuth**, sin token: `claude mcp add --transport http nullpointer-editor https://…/mcp`. Después, dentro de Claude Code, ejecuta `/mcp` › *nullpointer-editor* › *Authenticate*. Funciona también con `http://localhost:8080/mcp`, porque se aceptan las redirecciones a `localhost`.
 
-En todos los casos el cliente se registra solo (registro dinámico, RFC 7591) y abre en el navegador la pantalla **Autorizar aplicación** de Typst Extend. Si no tienes sesión, primero pide el usuario y la contraseña y luego vuelve a esa pantalla. Ahí eliges:
+En todos los casos el cliente se registra solo (registro dinámico, RFC 7591) y abre en el navegador la pantalla **Autorizar aplicación** de nullpointer editor. Si no tienes sesión, primero pide el usuario y la contraseña y luego vuelve a esa pantalla. Ahí eliges:
 - **Permisos:** solo lectura, o lectura y escritura.
 - **Proyectos:** todos tus proyectos (también los que se creen después) o solo los que marques.
 

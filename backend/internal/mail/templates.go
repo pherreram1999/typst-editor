@@ -27,7 +27,7 @@ func render(l layout) (htmlOut, text string) {
 	b.WriteString(`<div style="display:none;max-height:0;overflow:hidden;opacity:0">` + e(l.Preheader) + `</div>`)
 	b.WriteString(`<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f1f5f9;padding:32px 12px"><tr><td align="center">`)
 	b.WriteString(`<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px">`)
-	b.WriteString(`<tr><td style="padding:0 4px 16px;font-size:17px;font-weight:700;color:#1e3a8a">Typst Extend</td></tr>`)
+	b.WriteString(`<tr><td style="padding:0 4px 16px;font-size:17px;font-weight:700;color:#1e3a8a">nullpointer editor</td></tr>`)
 	b.WriteString(`<tr><td style="background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;padding:32px 28px">`)
 	b.WriteString(`<h1 style="margin:0 0 16px;font-size:21px;line-height:1.3;color:#0f172a">` + e(l.Title) + `</h1>`)
 	for _, p := range l.Paras {
@@ -76,14 +76,14 @@ func FormatDate(t time.Time) string {
 func Welcome(to, name, username, inviter, url string, exp time.Time) Message {
 	paras := []string{"Hola, " + name + "."}
 	if inviter != "" {
-		paras = append(paras, inviter+" te creó una cuenta en Typst Extend, el editor colaborativo de documentos Typst.")
+		paras = append(paras, inviter+" te creó una cuenta en nullpointer editor, el editor colaborativo de documentos Typst.")
 	} else {
-		paras = append(paras, "Se creó una cuenta para ti en Typst Extend, el editor colaborativo de documentos Typst.")
+		paras = append(paras, "Se creó una cuenta para ti en nullpointer editor, el editor colaborativo de documentos Typst.")
 	}
 	paras = append(paras, "Tu usuario es «"+username+"». También puedes iniciar sesión con este correo. Para activar la cuenta, define tu contraseña:")
-	return message(to, "Activa tu cuenta de Typst Extend", "alta", layout{
-		Preheader: "Define tu contraseña para empezar a usar Typst Extend.",
-		Title:     "Bienvenido a Typst Extend",
+	return message(to, "Activa tu cuenta de nullpointer editor", "alta", layout{
+		Preheader: "Define tu contraseña para empezar a usar nullpointer editor.",
+		Title:     "Bienvenido a nullpointer editor",
 		Paras:     paras,
 		Button:    "Definir mi contraseña",
 		URL:       url,
@@ -93,7 +93,7 @@ func Welcome(to, name, username, inviter, url string, exp time.Time) Message {
 
 // ResetPassword: enlace para elegir una contraseña nueva.
 func ResetPassword(to, name, url string, exp time.Time) Message {
-	return message(to, "Restablece tu contraseña de Typst Extend", "clave", layout{
+	return message(to, "Restablece tu contraseña de nullpointer editor", "clave", layout{
 		Preheader: "Elige una contraseña nueva para tu cuenta.",
 		Title:     "Restablecer la contraseña",
 		Paras: []string{
@@ -108,12 +108,12 @@ func ResetPassword(to, name, url string, exp time.Time) Message {
 
 // VerifyEmail: confirmar el correo que un usuario añadió a su cuenta.
 func VerifyEmail(to, name, url string, exp time.Time) Message {
-	return message(to, "Confirma tu correo en Typst Extend", "correo", layout{
+	return message(to, "Confirma tu correo en nullpointer editor", "correo", layout{
 		Preheader: "Confirma que este correo es tuyo.",
 		Title:     "Confirma tu correo",
 		Paras: []string{
 			"Hola, " + name + ".",
-			"Confirma que quieres usar esta dirección en tu cuenta de Typst Extend. Con ella podrás iniciar sesión, recuperar tu contraseña y recibir avisos de los proyectos que te compartan.",
+			"Confirma que quieres usar esta dirección en tu cuenta de nullpointer editor. Con ella podrás iniciar sesión, recuperar tu contraseña y recibir avisos de los proyectos que te compartan.",
 		},
 		Button: "Confirmar mi correo",
 		URL:    url,
@@ -124,7 +124,7 @@ func VerifyEmail(to, name, url string, exp time.Time) Message {
 // ProjectShared: aviso a un usuario registrado al que agregaron a un proyecto.
 func ProjectShared(to, name, inviter, project, url string) Message {
 	return message(to, inviter+" compartió «"+project+"» contigo", "proyecto", layout{
-		Preheader: "Ya puedes editar «" + project + "» en Typst Extend.",
+		Preheader: "Ya puedes editar «" + project + "» en nullpointer editor.",
 		Title:     "Te compartieron un proyecto",
 		Paras: []string{
 			"Hola, " + name + ".",
@@ -132,7 +132,7 @@ func ProjectShared(to, name, inviter, project, url string) Message {
 		},
 		Button: "Abrir el proyecto",
 		URL:    url,
-		Note:   "Recibes este aviso porque tienes una cuenta en Typst Extend con este correo.",
+		Note:   "Recibes este aviso porque tienes una cuenta en nullpointer editor con este correo.",
 	})
 }
 
@@ -143,7 +143,7 @@ func ProjectInvite(to, inviter, project, url string, exp time.Time) Message {
 		Title:     "Te invitaron a colaborar",
 		Paras: []string{
 			"Hola.",
-			inviter + " te invitó a colaborar en el proyecto «" + project + "» de Typst Extend, el editor colaborativo de documentos Typst.",
+			inviter + " te invitó a colaborar en el proyecto «" + project + "» de nullpointer editor, el editor colaborativo de documentos Typst.",
 			"Acepta la invitación para crear tu cuenta (o entrar con la que ya tengas) y abrir el proyecto:",
 		},
 		Button: "Aceptar la invitación",

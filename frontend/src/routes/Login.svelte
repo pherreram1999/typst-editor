@@ -1,4 +1,5 @@
 <script>
+  import Logo from '../lib/Logo.svelte'
   import { onMount } from 'svelte'
   import { api, authConfig, forgotPassword } from '../lib/api.js'
 
@@ -63,13 +64,7 @@
       md:flex-[1_1_420px] md:justify-between md:gap-8 md:bg-primary md:p-12"
   >
     <div class="flex items-center gap-3">
-      <div class="flex size-10 items-center justify-center rounded-[10px] bg-surface text-primary">
-        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-          stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <path d="M4 7V4h16v3" /><path d="M9 20h6" /><path d="M12 4v16" />
-        </svg>
-      </div>
-      <span class="text-lg font-bold">Typst Extend</span>
+      <Logo on="dark" size="lg" />
     </div>
     <div class="flex max-w-md flex-col gap-2 md:gap-3">
       <h1 class="text-[28px] leading-tight font-bold tracking-tight md:text-4xl">Bienvenido de nuevo</h1>
@@ -77,7 +72,7 @@
         Inicia sesión con tu usuario o tu correo.
       </p>
     </div>
-    <span class="hidden text-[13px] text-white/60 md:block">© {new Date().getFullYear()} Typst Extend</span>
+    <span class="hidden text-[13px] text-white/60 md:block">© {new Date().getFullYear()} nullpointer</span>
   </aside>
 
   <main
@@ -158,7 +153,7 @@
     </form>
 
     <span class="mt-auto pt-10 text-center text-[13px] text-slate-500 md:hidden">
-      © {new Date().getFullYear()} Typst Extend
+      © {new Date().getFullYear()} nullpointer
     </span>
   </main>
 </div>

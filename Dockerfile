@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 #
-# Imagen de Typst Extend: servidor Go (API + frontend compilado) + typst + git.
+# Imagen de nullpointer editor: servidor Go (API + frontend compilado) + typst + git.
 #
 #   docker build -t typst-editor .
 #   docker build --build-arg MS_FONTS=0 -t typst-editor .   # sin fuentes de Microsoft

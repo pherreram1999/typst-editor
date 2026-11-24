@@ -1207,7 +1207,7 @@ func (s *Server) gitPush(w http.ResponseWriter, r *http.Request) {
 	}
 	in.Message = strings.TrimSpace(in.Message)
 	if in.Message == "" {
-		in.Message = "Actualización desde Typst Extend"
+		in.Message = "Actualización desde nullpointer editor"
 	}
 	if len(in.Message) > 2000 {
 		writeError(w, http.StatusBadRequest, "mensaje de commit demasiado largo")

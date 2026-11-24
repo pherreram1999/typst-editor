@@ -183,7 +183,7 @@ func Load() (*Config, error) {
 		AdminName:     get("ADMIN_NAME", "Administrador"),
 		AdminEmail:    strings.ToLower(strings.TrimSpace(os.Getenv("ADMIN_EMAIL"))),
 		ResendKey:     strings.TrimSpace(firstEnv("RESEND", "RESEND_API_KEY")),
-		MailFrom:      get("MAIL_FROM", "Typst Extend <onboarding@resend.dev>"),
+		MailFrom:      get("MAIL_FROM", "nullpointer editor <onboarding@resend.dev>"),
 		MailEnabled:   !isFalse(os.Getenv("MAIL_ENABLED")),
 		DataDir:       dataDir,
 		TypstBin:      get("TYPST_BIN", "typst"),

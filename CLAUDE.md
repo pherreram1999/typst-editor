@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Overview
 
-Typst Extend: real-time collaborative Typst editor. Svelte 5 SPA (`frontend/`), Go `net/http` JSON + WebSocket API (`backend/`), MariaDB (`database/`) or libSQL/Bunny Database (`DB_DRIVER`). Features: multi-user editing via OT (CodeMirror 6 + `@codemirror/collab`), an MCP server for AI agents (OAuth 2.1 or personal tokens), live SVG preview compiled in the browser (typst.ts WebAssembly, incremental; falls back to the server) and PDF viewer produced by the system `typst` binary, manual GitHub pull/push via the system `git` binary, project sharing (owner invites registered users as members), JWT auth and admin user management. All user-facing text, error messages, log lines and code comments are in **Spanish** — keep it that way.
+nullpointer editor: real-time collaborative Typst editor. Svelte 5 SPA (`frontend/`), Go `net/http` JSON + WebSocket API (`backend/`), MariaDB (`database/`) or libSQL/Bunny Database (`DB_DRIVER`). Features: multi-user editing via OT (CodeMirror 6 + `@codemirror/collab`), an MCP server for AI agents (OAuth 2.1 or personal tokens), live SVG preview compiled in the browser (typst.ts WebAssembly, incremental; falls back to the server) and PDF viewer produced by the system `typst` binary, manual GitHub pull/push via the system `git` binary, project sharing (owner invites registered users as members), JWT auth and admin user management. All user-facing text, error messages, log lines and code comments are in **Spanish** — keep it that way.
 
 ## Commands
 

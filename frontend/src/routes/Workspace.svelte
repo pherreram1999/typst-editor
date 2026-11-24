@@ -1390,7 +1390,7 @@
       {/if}
       <label class="flex flex-col gap-1.5">
         <span class="label">Mensaje del commit</span>
-        <textarea class="input !h-20 py-2" bind:value={pushMessage} maxlength="2000" placeholder="Actualización desde Typst Extend"></textarea>
+        <textarea class="input !h-20 py-2" bind:value={pushMessage} maxlength="2000" placeholder="Actualización desde nullpointer editor"></textarea>
       </label>
       {#if !project.has_token}
         <p class="text-xs text-amber-700">El proyecto no tiene cuenta de GitHub asignada: el push fallará. Asígnale una en los ajustes.</p>

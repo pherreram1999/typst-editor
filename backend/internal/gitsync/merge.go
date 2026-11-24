@@ -168,7 +168,7 @@ func (g *Git) Resolve(ctx context.Context, dir string, a *Author, theirs string,
 	if err != nil || saved != theirs {
 		return "", &UserError{Msg: "la fusión pendiente ya no es válida; vuelve a hacer pull"}
 	}
-	if _, err := g.commitAll(ctx, dir, a, "Cambios locales antes de fusionar (Typst Extend)"); err != nil {
+	if _, err := g.commitAll(ctx, dir, a, "Cambios locales antes de fusionar (nullpointer editor)"); err != nil {
 		return "", err
 	}
 	byPath := map[string]Resolution{}

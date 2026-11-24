@@ -51,7 +51,7 @@ func TestLiveSend(t *testing.T) {
 	}
 	from := os.Getenv("MAIL_FROM")
 	if from == "" {
-		from = "Typst Extend <onboarding@resend.dev>"
+		from = "nullpointer editor <onboarding@resend.dev>"
 	}
 	m := New(key, from)
 	exp := time.Now().Add(7 * 24 * time.Hour)

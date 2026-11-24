@@ -1,4 +1,5 @@
 <script>
+  import Logo from './Logo.svelte'
   import { session, clearSession } from './session.svelte.js'
   import { theme, setTheme, THEMES } from './theme.svelte.js'
   import Modal from './Modal.svelte'
@@ -30,7 +31,7 @@
 <nav class="bg-nav text-white">
   <div class="flex min-h-14 flex-wrap items-center justify-between gap-3 px-6">
     <div class="flex flex-wrap items-center gap-6">
-      <span class="text-[17px] font-bold">Typst Extend</span>
+      <Logo on="dark" />
       {#each links as l}
         <a
           href={l.href}

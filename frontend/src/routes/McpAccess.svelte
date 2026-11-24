@@ -120,11 +120,11 @@
   }
 
   const claudeCmd = $derived(
-    `claude mcp add --transport http typst-editor ${mcpUrl} --header "Authorization: Bearer ${created ?? '<token>'}"`,
+    `claude mcp add --transport http nullpointer-editor ${mcpUrl} --header "Authorization: Bearer ${created ?? '<token>'}"`,
   )
   const jsonConfig = $derived(
     JSON.stringify(
-      { mcpServers: { 'typst-editor': { type: 'http', url: mcpUrl, headers: { Authorization: `Bearer ${created ?? '<token>'}` } } } },
+      { mcpServers: { 'nullpointer-editor': { type: 'http', url: mcpUrl, headers: { Authorization: `Bearer ${created ?? '<token>'}` } } } },
       null,
       2,
     ),

@@ -1,4 +1,5 @@
 <script>
+  import Logo from '../lib/Logo.svelte'
   // Invitación a un proyecto recibida por correo (#/unirse/<token>): crea la
   // cuenta con ese correo o, con sesión, acepta con la cuenta actual. De un
   // solo uso; al aceptar se abre el proyecto.
@@ -79,7 +80,7 @@
 
 <main class="flex min-h-screen items-center justify-center bg-slate-100 px-4 py-10" in:pageIn>
   <div class="w-full max-w-md">
-    <p class="mb-5 text-center text-[17px] font-bold text-slate-800">Typst Extend</p>
+    <p class="mb-5 flex justify-center"><Logo /></p>
     <div class="card overflow-hidden !p-0">
       {#if loadError}
         <div class="flex flex-col gap-3 px-7 py-8 text-center">

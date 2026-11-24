@@ -1,4 +1,5 @@
 <script>
+  import Logo from './lib/Logo.svelte'
   import { onMount } from 'svelte'
   import { session, clearSession, leaveGuest } from './lib/session.svelte.js'
   import { api, rememberReturn, takeReturn } from './lib/api.js'
@@ -115,7 +116,7 @@
     <!-- Contraseña temporal (alta o restablecimiento sin correo): cambio obligatorio. -->
     <main class="flex min-h-screen items-center justify-center bg-slate-100 px-4 py-10 [grid-area:1/1]" in:pageIn>
       <div class="w-full max-w-md">
-        <p class="mb-5 text-center text-[17px] font-bold text-slate-800">Typst Extend</p>
+        <p class="mb-5 flex justify-center"><Logo /></p>
         <div class="card flex flex-col gap-4 !p-7">
           <div>
             <h1 class="text-xl font-bold">Cambia tu contraseña</h1>

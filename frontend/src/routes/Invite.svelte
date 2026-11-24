@@ -1,4 +1,5 @@
 <script>
+  import Logo from '../lib/Logo.svelte'
   // Enlace de invitado (#/i/<token>): una URL firmada que caduca y da acceso
   // al proyecto sin cuenta. Primero se muestra una vista previa (proyecto,
   // permiso, caducidad) donde el invitado elige su nombre —uno aleatorio o el
@@ -145,7 +146,7 @@
     <nav class="bg-nav text-white max-lg:hidden">
       <div class="flex h-14 items-center justify-between gap-3 px-6">
         <div class="flex min-w-0 items-center gap-3">
-          <span class="text-[17px] font-bold">Typst Extend</span>
+          <Logo on="dark" />
           <span class="rounded-md bg-white/15 px-2 py-0.5 text-xs font-semibold">Invitado</span>
           {#if joined.permission === 'view'}
             <span class="rounded-md bg-amber-400/90 px-2 py-0.5 text-xs font-semibold text-amber-950">Solo lectura</span>
@@ -170,7 +171,7 @@
 {:else}
   <main class="flex min-h-screen items-center justify-center bg-slate-100 px-4 py-10" in:pageIn>
     <div class="w-full max-w-md">
-      <p class="mb-5 text-center text-[17px] font-bold text-slate-800">Typst Extend</p>
+      <p class="mb-5 flex justify-center"><Logo /></p>
       <div class="card overflow-hidden !p-0">
         {#if info}
           <div class="border-b border-slate-200 bg-primary-tint px-6 py-5">

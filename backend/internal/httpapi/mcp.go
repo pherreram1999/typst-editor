@@ -42,7 +42,7 @@ import (
 //  3. la concesión puede limitarse a ciertos proyectos;
 //  4. las herramientas que modifican exigen el scope typst:write.
 
-const mcpInstructions = `Servidor de Typst Extend: proyectos Typst colaborativos con vista previa y PDF.
+const mcpInstructions = `Servidor de nullpointer editor: proyectos Typst colaborativos con vista previa y PDF.
 
 Flujo habitual: list_projects → list_files → read_file → edit_file / write_file → compile (diagnósticos) → render_pages (ver cómo queda) → get_pdf.
 - Las rutas son relativas a la raíz del proyecto, con "/" (p. ej. "capitulos/intro.typ").
@@ -67,7 +67,7 @@ func (s *Server) mcpRoutes(mux *http.ServeMux, authed func(string, http.HandlerF
 		AuthorizationServers:   []string{pub},
 		ScopesSupported:        oauth.AllScopes,
 		BearerMethodsSupported: []string{"header"},
-		ResourceName:           "Typst Extend",
+		ResourceName:           "nullpointer editor",
 		ResourceDocumentation:  pub + "/#/mcp",
 	})
 	mux.Handle("GET /.well-known/oauth-protected-resource", prm)
@@ -173,7 +173,7 @@ func (c *mcpCaller) allows(projectID int64) bool {
 	return c.grant.AllProjects || slices.Contains(c.grant.Projects, projectID)
 }
 
-var errReadOnly = errors.New("este acceso es de solo lectura (falta el permiso typst:write); el usuario puede ampliarlo en Typst Extend › Agentes (MCP)")
+var errReadOnly = errors.New("este acceso es de solo lectura (falta el permiso typst:write); el usuario puede ampliarlo en nullpointer editor › Agentes (MCP)")
 
 // project carga un proyecto con las comprobaciones de permisos de MCP.
 func (s *Server) project(ctx context.Context, c *mcpCaller, id int64, write bool) (*Project, error) {

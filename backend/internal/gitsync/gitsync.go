@@ -159,7 +159,7 @@ func (g *Git) Pull(ctx context.Context, dir string, r *Remote, a *Author) (strin
 	if err := g.ensureRemote(ctx, dir, r); err != nil {
 		return "", err
 	}
-	if _, err := g.commitAll(ctx, dir, a, "Cambios locales antes de pull (Typst Extend)"); err != nil {
+	if _, err := g.commitAll(ctx, dir, a, "Cambios locales antes de pull (nullpointer editor)"); err != nil {
 		return "", err
 	}
 	if _, err := g.cmd(ctx, dir, r, nil, "fetch", "-q", "origin", r.Branch); err != nil {

@@ -60,7 +60,7 @@
     <div class="card flex flex-col gap-5 p-6">
       <div class="flex flex-col gap-1">
         <p class="text-[15px]">
-          <strong>{info.client_name}</strong> quiere acceder a tus proyectos de Typst Extend para trabajar con ellos como
+          <strong>{info.client_name}</strong> quiere acceder a tus proyectos de nullpointer editor para trabajar con ellos como
           agente (MCP).
         </p>
         <p class="text-xs text-slate-500">

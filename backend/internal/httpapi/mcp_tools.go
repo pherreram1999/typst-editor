@@ -34,7 +34,7 @@ const (
 )
 
 func (s *Server) newMCPServer() *mcp.Server {
-	srv := mcp.NewServer(&mcp.Implementation{Name: "typst-extend", Title: "Typst Extend", Version: "1.0.0"},
+	srv := mcp.NewServer(&mcp.Implementation{Name: "nullpointer-editor", Title: "nullpointer editor", Version: "1.0.0"},
 		&mcp.ServerOptions{Instructions: mcpInstructions})
 	s.addMCPTools(srv)
 	return srv

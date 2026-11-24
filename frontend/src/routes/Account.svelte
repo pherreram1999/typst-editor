@@ -1,4 +1,5 @@
 <script>
+  import Logo from '../lib/Logo.svelte'
   // Enlaces de cuenta recibidos por correo (#/cuenta/<token>): definir la
   // contraseña de una cuenta nueva (alta por el administrador), elegir una
   // nueva («olvidé mi contraseña») o confirmar un correo. De un solo uso.
@@ -26,7 +27,7 @@
       (r) => {
         info = r
         name = r.name
-        document.title = r.purpose === 'email' ? 'Confirmar correo · Typst Extend' : 'Contraseña · Typst Extend'
+        document.title = r.purpose === 'email' ? 'Confirmar correo · nullpointer editor' : 'Contraseña · nullpointer editor'
       },
       (e) => (loadError = e.message),
     )
@@ -73,7 +74,7 @@
 
 <main class="flex min-h-screen items-center justify-center bg-slate-100 px-4 py-10" in:pageIn>
   <div class="w-full max-w-md">
-    <p class="mb-5 text-center text-[17px] font-bold text-slate-800">Typst Extend</p>
+    <p class="mb-5 flex justify-center"><Logo /></p>
     <div class="card flex flex-col gap-4 !p-7">
       {#if loadError}
         <h1 class="text-xl font-bold">Enlace no válido</h1>
